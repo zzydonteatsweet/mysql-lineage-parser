@@ -4,6 +4,8 @@ import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.util.List;
+
 /**
  * 列信息
  */
@@ -31,6 +33,36 @@ public class ColumnInfo {
      * 数据类型
      */
     private String dataType;
+
+    /**
+     * 是否为空
+     */
+    private Boolean nullable;
+
+    /**
+     * 默认值
+     */
+    private String defaultValue;
+
+    /**
+     * 注释
+     */
+    private String comment;
+
+    /**
+     * 是否为主键
+     */
+    private Boolean isPrimaryKey;
+
+    /**
+     * 是否自增
+     */
+    private Boolean autoIncrement;
+
+    /**
+     * 列约束列表（UNIQUE, NOT NULL 等）
+     */
+    private List<String> constraints;
 
     public ColumnInfo(TableInfo table, String columnName) {
         this.table = table;

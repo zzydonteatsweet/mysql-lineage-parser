@@ -1,13 +1,13 @@
 package com.zzy.mysqllineageparser.visitor;
 
 import com.alibaba.druid.sql.ast.SQLExpr;
-import com.alibaba.druid.sql.ast.SQLIndexDefinition;
 import com.alibaba.druid.sql.ast.expr.SQLIdentifierExpr;
 import com.alibaba.druid.sql.ast.expr.SQLPropertyExpr;
 import com.alibaba.druid.sql.ast.statement.SQLColumnDefinition;
-import com.alibaba.druid.sql.dialect.mysql.ast.statement.MySqlCreateTableStatement;
+import com.alibaba.druid.sql.ast.statement.SQLSelectOrderByItem;
 import com.alibaba.druid.sql.dialect.mysql.ast.MySqlPrimaryKey;
 import com.alibaba.druid.sql.dialect.mysql.ast.MySqlUnique;
+import com.alibaba.druid.sql.dialect.mysql.ast.statement.MySqlCreateTableStatement;
 import com.alibaba.druid.sql.dialect.mysql.visitor.MySqlASTVisitorAdapter;
 import com.zzy.mysqllineageparser.model.ColumnInfo;
 import com.zzy.mysqllineageparser.model.TableInfo;
@@ -29,11 +29,14 @@ public class LineageVisitor extends MySqlASTVisitorAdapter {
         // 提取表名
         extractTableName(x);
 
+        // 提取列定义
+        extractColumns(x);
+
         // 提取表选项
         extractTableOptions(x);
 
-        // 继续遍历子节点（列、约束等）
-        return true;
+        // 继续遍历子节点（约束等）
+        return false;
     }
 
     @Override
@@ -46,37 +49,6 @@ public class LineageVisitor extends MySqlASTVisitorAdapter {
         // 数据类型
         if (x.getDataType() != null) {
             column.setDataType(x.getDataType().getName());
-        }
-
-        // 默认值
-        if (x.getDefaultExpr() != null) {
-            column.setDefaultValue(x.getDefaultExpr().toString());
-        }
-
-        // 是否可为空
-        column.setNullable(true); // 默认可为 NULL
-        if (x.containsNotNullConstraint()) {
-            column.setNullable(false);
-        }
-
-        // AUTO_INCREMENT
-        if (x.getAutoIncrement() != null) {
-            column.setAutoIncrement(true);
-        }
-
-        // 主键
-        if (x.containsPrimaryKeyConstraint()) {
-            column.setPrimaryKey(true);
-        }
-
-        // 唯一约束
-        if (x.containsUniqueConstraint()) {
-            column.setUnique(true);
-        }
-
-        // 注释
-        if (x.getComment() != null) {
-            column.setComment(x.getComment().toString());
         }
 
         metadata.addColumn(column);
@@ -99,8 +71,8 @@ public class LineageVisitor extends MySqlASTVisitorAdapter {
 
         // 主键列
         List<String> columns = new ArrayList<>();
-        for (SQLExpr expr : x.getColumns()) {
-            columns.add(expr.toString());
+        for (SQLSelectOrderByItem item : x.getColumns()) {
+            columns.add(item.getExpr().toString());
         }
         constraint.setColumns(columns);
 
@@ -121,38 +93,12 @@ public class LineageVisitor extends MySqlASTVisitorAdapter {
 
         // 唯一约束列
         List<String> columns = new ArrayList<>();
-        for (SQLExpr expr : x.getColumns()) {
-            columns.add(expr.toString());
+        for (SQLSelectOrderByItem item : x.getColumns()) {
+            columns.add(item.getExpr().toString());
         }
         constraint.setColumns(columns);
 
         metadata.addConstraint(constraint);
-
-        return true;
-    }
-
-    @Override
-    public boolean visit(SQLIndexDefinition x) {
-        IndexInfo index = new IndexInfo();
-
-        // 索引名称
-        if (x.getName() != null) {
-            index.setIndexName(x.getName().toString());
-        }
-
-        // 索引类型
-        if (x.getIndexType() != null) {
-            index.setIndexType(x.getIndexType().name());
-        }
-
-        // 索引列
-        List<String> columns = new ArrayList<>();
-        for (SQLExpr expr : x.getColumns()) {
-            columns.add(expr.toString());
-        }
-        index.setColumns(columns);
-
-        metadata.addIndex(index);
 
         return true;
     }
@@ -184,28 +130,44 @@ public class LineageVisitor extends MySqlASTVisitorAdapter {
     }
 
     /**
+     * 提取列定义
+     */
+    private void extractColumns(MySqlCreateTableStatement x) {
+        if (x.getTableElementList() == null) {
+            return;
+        }
+        for (SQLColumnDefinition columnDef : x.getColumnDefinitions()) {
+            ColumnInfo column = new ColumnInfo();
+            column.setColumnName(columnDef.getColumnName());
+            if (columnDef.getDataType() != null) {
+                column.setDataType(columnDef.getDataType().getName());
+            }
+            if (columnDef.getComment() != null) {
+                column.setComment(columnDef.getComment().toString());
+            }
+            metadata.addColumn(column);
+        }
+    }
+
+    /**
      * 提取表选项（ENGINE, CHARSET 等）
      */
     private void extractTableOptions(MySqlCreateTableStatement x) {
         if (x.getEngine() != null) {
             metadata.setEngine(x.getEngine().toString());
         }
-        if (x.getCharset() != null) {
-            // todo
-            x.getTableOptions().stream().filter(sqlAssignItem -> {
-                sqlAssignItem.getTarget().computeDataType()
-            })
-            metadata.setCharset(x.getCharset().toString());
-        }
-        if (x.getTableOptionsString("COLLATE") != null) {
-            metadata.setCollation(x.getTableOptionsString("COLLATE"));
-        }
-        if (x.getTableOptionsString("COMMENT") != null) {
-            metadata.setComment(x.getTableOptionsString("COMMENT"));
-        }
-        if (x.getTableOptionsInt("AUTO_INCREMENT") != null) {
-            metadata.setAutoIncrement(x.getTableOptionsInt("AUTO_INCREMENT"));
-        }
+//        if (x != null) {
+//            metadata.setCharset();
+//        }
+//        if (x.getTableOptionsString("COLLATE") != null) {
+//            metadata.setCollation(x.getTableOptionsString("COLLATE"));
+//        }
+//        if (x.getTableOptionsString("COMMENT") != null) {
+//            metadata.setComment(x.getTableOptionsString("COMMENT"));
+//        }
+//        if (x.getTableOptionsInt("AUTO_INCREMENT") != null) {
+//            metadata.setAutoIncrement(x.getTableOptionsInt("AUTO_INCREMENT"));
+//        }
     }
 
     public TableMetadata getMetadata() {

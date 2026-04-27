@@ -42,6 +42,7 @@ public class MysqlLineageParserImpl implements SqlLineageParser {
             StatementParseStrategy strategy = strategyFactory.getStrategy(sqlType);
             strategy.parse(sql, result, context);
         }
+        
 
         return result;
     }

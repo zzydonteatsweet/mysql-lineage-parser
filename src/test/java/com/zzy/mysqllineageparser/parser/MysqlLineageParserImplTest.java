@@ -2,9 +2,17 @@ package com.zzy.mysqllineageparser.parser;
 
 import com.zzy.mysqllineageparser.model.LineageResult;
 import com.zzy.mysqllineageparser.model.TableInfo;
+import com.zzy.mysqllineageparser.parser.strategy.CreateTableParseStrategy;
+import com.zzy.mysqllineageparser.parser.strategy.DeleteParseStrategy;
+import com.zzy.mysqllineageparser.parser.strategy.InsertParseStrategy;
+import com.zzy.mysqllineageparser.parser.strategy.ParseStrategyFactory;
+import com.zzy.mysqllineageparser.parser.strategy.SelectParseStrategy;
+import com.zzy.mysqllineageparser.parser.strategy.StatementParseStrategy;
+import com.zzy.mysqllineageparser.parser.strategy.UpdateParseStrategy;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -18,7 +26,19 @@ class MysqlLineageParserImplTest {
 
     @BeforeEach
     void setUp() {
-        parser = new MysqlLineageParserImpl();
+        // 创建所有策略实例
+        List<StatementParseStrategy> strategies = new ArrayList<>();
+        strategies.add(new CreateTableParseStrategy());
+        strategies.add(new InsertParseStrategy());
+        strategies.add(new SelectParseStrategy());
+        strategies.add(new UpdateParseStrategy());
+        strategies.add(new DeleteParseStrategy());
+
+        // 创建策略工厂
+        ParseStrategyFactory factory = new ParseStrategyFactory(strategies);
+
+        // 创建解析器
+        parser = new MysqlLineageParserImpl(factory);
     }
 
     @Test

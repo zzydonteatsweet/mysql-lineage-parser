@@ -12,13 +12,19 @@ public class LineageExample {
         // SQL: SELECT id, name, salary * 1.1 AS new_salary FROM db1.employees WHERE department = 'IT'
         simpleSelectExample();
 
-        System.out.println("\n" + "=".repeat(60) + "\n");
+        System.out.println("\n" + createRepeatedString('=', 60) + "\n");
 
         // 示例2: 带连接的查询血缘
         // SQL: INSERT INTO db2.order_summary
         //      SELECT u.user_id, u.name, o.order_id, o.amount * 0.9 AS discount_amount
         //      FROM db1.users u JOIN db1.orders o ON u.user_id = o.user_id
         joinQueryExample();
+    }
+
+    private static String createRepeatedString(char c, int count) {
+        char[] chars = new char[count];
+        Arrays.fill(chars, c);
+        return new String(chars);
     }
 
     /**
