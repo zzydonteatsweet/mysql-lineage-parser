@@ -11,8 +11,9 @@ import org.springframework.stereotype.Component;
 public class InsertParseStrategy implements StatementParseStrategy {
 
     @Override
-    public void parse(String sql, LineageResult result, ParseContext context) {
+    public LineageResult parse(String sql, ParseContext context) {
         // TODO: 待实现 INSERT 语句解析逻辑
+        return new LineageResult(sql);
     }
 
     @Override

@@ -20,7 +20,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * MySQL血缘解析器测试类
  */
-class MysqlLineageParserImplTest {
+class CreateLineageParserImplTest {
 
     private SqlLineageParser parser;
 

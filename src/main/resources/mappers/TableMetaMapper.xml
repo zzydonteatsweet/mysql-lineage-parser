@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.zzy.mysqllineageparser.mybatis.mapper.TableMetaMapper">
+
+    <!-- 获取指定表的 DDL -->
+    <select id="getTableDdl" resultType="java.lang.String">
+        SHOW CREATE TABLE ${tableName}
+    </select>
+
+    <!-- 获取当前数据库中所有表名 -->
+    <select id="getAllTableNames" resultType="java.lang.String">
+        SELECT TABLE_NAME
+        FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = DATABASE()
+    </select>
+
+    <!-- 获取指定表的所有列元信息 -->
+    <select id="getTableColumns" resultType="ColumnMetaDO">
+        SELECT
+            TABLE_SCHEMA  AS tableSchema,
+            TABLE_NAME    AS tableName,
+            COLUMN_NAME   AS columnName,
+            ORDINAL_POSITION AS ordinalPosition,
+            DATA_TYPE     AS dataType,
+            COLUMN_TYPE   AS columnType,
+            IS_NULLABLE   AS isNullable,
+            COLUMN_DEFAULT AS columnDefault,
+            COLUMN_COMMENT AS columnComment,
+            COLUMN_KEY    AS columnKey,
+            EXTRA         AS extra
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = #{tableName}
+        ORDER BY ORDINAL_POSITION
+    </select>
+
+</mapper>

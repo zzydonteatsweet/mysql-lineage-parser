@@ -12,6 +12,7 @@ import com.alibaba.druid.sql.dialect.mysql.visitor.MySqlASTVisitorAdapter;
 import com.zzy.mysqllineageparser.model.ColumnInfo;
 import com.zzy.mysqllineageparser.model.TableInfo;
 import lombok.Data;
+import lombok.Getter;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -20,7 +21,8 @@ import java.util.List;
  * CREATE TABLE 深度遍历访问者
  * 使用 Druid SQL 解析器的 Visitor 模式提取表结构信息
  */
-public class LineageVisitor extends MySqlASTVisitorAdapter {
+@Getter
+public class CreateLineageVisitor extends MySqlASTVisitorAdapter {
 
     private final TableMetadata metadata = new TableMetadata();
 
@@ -156,22 +158,6 @@ public class LineageVisitor extends MySqlASTVisitorAdapter {
         if (x.getEngine() != null) {
             metadata.setEngine(x.getEngine().toString());
         }
-//        if (x != null) {
-//            metadata.setCharset();
-//        }
-//        if (x.getTableOptionsString("COLLATE") != null) {
-//            metadata.setCollation(x.getTableOptionsString("COLLATE"));
-//        }
-//        if (x.getTableOptionsString("COMMENT") != null) {
-//            metadata.setComment(x.getTableOptionsString("COMMENT"));
-//        }
-//        if (x.getTableOptionsInt("AUTO_INCREMENT") != null) {
-//            metadata.setAutoIncrement(x.getTableOptionsInt("AUTO_INCREMENT"));
-//        }
-    }
-
-    public TableMetadata getMetadata() {
-        return metadata;
     }
 
     /**

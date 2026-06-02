@@ -8,7 +8,7 @@ import com.zzy.mysqllineageparser.model.ColumnInfo;
 import com.zzy.mysqllineageparser.model.LineageResult;
 import com.zzy.mysqllineageparser.model.TableInfo;
 import com.zzy.mysqllineageparser.parser.ParseContext;
-import com.zzy.mysqllineageparser.visitor.LineageVisitor;
+import com.zzy.mysqllineageparser.visitor.CreateLineageVisitor;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -20,7 +20,8 @@ import java.util.List;
 public class CreateTableParseStrategy implements StatementParseStrategy {
 
     @Override
-    public void parse(String sql, LineageResult result, ParseContext context) {
+    public LineageResult parse(String sql, ParseContext context) {
+        LineageResult result = new LineageResult(sql);
         try {
             // 1. 使用 Druid 解析 SQL
             List<SQLStatement> statements = SQLUtils.parseStatements(sql, JdbcConstants.MYSQL);
@@ -36,11 +37,11 @@ public class CreateTableParseStrategy implements StatementParseStrategy {
 
             // 2. 创建 Visitor 并遍历 AST
             MySqlCreateTableStatement createTableStmt = (MySqlCreateTableStatement) stmt;
-            LineageVisitor visitor = new LineageVisitor();
+            CreateLineageVisitor visitor = new CreateLineageVisitor();
             createTableStmt.accept(visitor);
 
             // 3. 获取解析结果
-            LineageVisitor.TableMetadata metadata = visitor.getMetadata();
+            CreateLineageVisitor.TableMetadata metadata = visitor.getMetadata();
 
             // 4. 如果没有指定数据库，使用上下文中的默认数据库
             String databaseName = metadata.getDatabaseName();
@@ -62,14 +63,11 @@ public class CreateTableParseStrategy implements StatementParseStrategy {
                 }
             }
 
-            // 7. 存储表选项（可选）
-            if (metadata.getEngine() != null) {
-                // 可以在 TableInfo 中添加 ENGINE 等属性
-            }
 
         } catch (Exception e) {
             throw new RuntimeException("解析 CREATE TABLE 语句失败: " + e.getMessage(), e);
         }
+        return result;
     }
 
     @Override

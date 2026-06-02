@@ -12,10 +12,10 @@ public interface StatementParseStrategy {
      * 解析SQL语句
      *
      * @param sql     SQL语句
-     * @param result  解析结果
      * @param context 解析上下文
+     * @return 解析结果
      */
-    void parse(String sql, LineageResult result, ParseContext context);
+    LineageResult parse(String sql, ParseContext context);
 
     /**
      * 获取支持的SQL类型

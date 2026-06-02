@@ -31,20 +31,19 @@ public class MysqlLineageParserImpl implements SqlLineageParser {
         }
 
         String trimmedSql = sql.trim().toUpperCase();
-        LineageResult result = new LineageResult(sql);
 
         // 提取SQL类型
         String sqlType = extractSqlType(trimmedSql);
-        result.setSqlType(sqlType);
 
         // 使用策略模式获取对应的解析策略
         if (strategyFactory.isSupported(sqlType)) {
             StatementParseStrategy strategy = strategyFactory.getStrategy(sqlType);
-            strategy.parse(sql, result, context);
+            LineageResult result = strategy.parse(sql, context);
+            result.setSqlType(sqlType);
+            return result;
         }
-        
 
-        return result;
+        return new LineageResult(sql);
     }
 
     /**

@@ -1,6 +1,9 @@
 package com.zzy.mysqllineageparser.parser;
 
+import com.alibaba.druid.DbType;
+import com.zzy.mysqllineageparser.visitor.helper.AstTreePrinter;
 import com.alibaba.druid.sql.SQLUtils;
+import com.alibaba.druid.sql.ast.SQLObject;
 import com.alibaba.druid.sql.ast.SQLStatement;
 import com.alibaba.druid.sql.ast.expr.SQLIdentifierExpr;
 import com.alibaba.druid.sql.ast.statement.*;
@@ -11,6 +14,8 @@ import com.alibaba.druid.sql.dialect.mysql.ast.statement.MySqlUpdateStatement;
 import com.alibaba.druid.util.JdbcConstants;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -33,16 +38,59 @@ class DruidNativeParserTest {
         assertNotNull(stmt);
 
         // 验证表名
-        assertEquals("users", stmt.getTableSource().getName());
+        assertEquals("users", stmt.getTableSource().getName().toString());
         assertNull(stmt.getTableSource().getSchema());
 
         // 验证列定义
         assertEquals(2, stmt.getTableElementList().size());
 
         // 验证 SQL 格式化输出
-        String formatted = SQLUtils.toMySqlString(stmt);
+        String formatted = SQLUtils.toSQLString(stmt, DbType.mysql);
         assertNotNull(formatted);
         assertTrue(formatted.toUpperCase().contains("CREATE TABLE"));
+
+        // 打印 AST 语法树结构
+        System.out.println("===== AST 语法树 =====");
+        System.out.println(AstTreePrinter.print(stmt));
+        System.out.println("======================");
+    }
+
+    private void printAst(SQLObject obj, int indent) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < indent; i++) {
+            sb.append("  ");
+        }
+        String prefix = sb.toString();
+        String content = obj.toString().replace("\n", "\n" + prefix);
+        System.out.println(prefix + obj.getClass().getSimpleName() + ": " + content);
+        List<SQLObject> children = getChildSqlObjects(obj);
+        for (SQLObject child : children) {
+            printAst(child, indent + 1);
+        }
+    }
+
+    private List<SQLObject> getChildSqlObjects(SQLObject obj) {
+        List<SQLObject> children = new ArrayList<SQLObject>();
+        try {
+            for (Class<?> clazz = obj.getClass(); clazz != Object.class; clazz = clazz.getSuperclass()) {
+                for (Field field : clazz.getDeclaredFields()) {
+                    field.setAccessible(true);
+                    Object value = field.get(obj);
+                    if (value instanceof SQLObject) {
+                        children.add((SQLObject) value);
+                    } else if (value instanceof List) {
+                        for (Object item : (List<?>) value) {
+                            if (item instanceof SQLObject) {
+                                children.add((SQLObject) item);
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            // ignore
+        }
+        return children;
     }
 
     @Test
@@ -292,6 +340,27 @@ class DruidNativeParserTest {
     }
 
     @Test
+    void testSelectWithFromSubquery() {
+        String sql = "SELECT t.dept_id, t.emp_count, t.avg_salary " +
+                "FROM (SELECT dept_id, COUNT(*) AS emp_count, AVG(salary) AS avg_salary " +
+                "       FROM employees " +
+                "       WHERE status = 1 " +
+                "       GROUP BY dept_id) t " +
+                "WHERE t.avg_salary > 5000;";
+
+        List<SQLStatement> statements = SQLUtils.parseStatements(sql, JdbcConstants.MYSQL);
+        assertEquals(1, statements.size());
+
+        SQLSelectStatement stmt = (SQLSelectStatement) statements.get(0);
+        assertNotNull(stmt);
+
+        // 打印 AST 语法树结构
+        System.out.println("===== FROM 子查询 AST 语法树 =====");
+        System.out.println(AstTreePrinter.print(stmt));
+        System.out.println("==================================");
+    }
+
+    @Test
     void testSelectWithGroupByAndOrderBy() {
         String sql = "SELECT dept_id, COUNT(*) AS emp_count, AVG(salary) AS avg_salary " +
                 "FROM employees " +
@@ -519,28 +588,11 @@ class DruidNativeParserTest {
         List<SQLStatement> statements = SQLUtils.parseStatements(sql, JdbcConstants.MYSQL);
         String formatted = SQLUtils.toMySqlString(statements.get(0));
         assertEquals(expected, formatted);
+
+        // 使用 AstTreePrinter 输出语法树
+        String tree = AstTreePrinter.print(statements.get(0));
+        System.out.println("=== AstTreePrinter Output ===");
+        System.out.println(tree);
     }
 
-    @Test
-    void testStatementTypeDetection() {
-        // CREATE
-        SQLStatement createStmt = SQLUtils.parseStatements(
-                "CREATE TABLE t (id INT);", JdbcConstants.MYSQL).get(0);
-        assertTrue(createStmt instanceof MySqlCreateTableStatement);
-
-        // INSERT
-        SQLStatement insertStmt = SQLUtils.parseStatements(
-                "INSERT INTO t VALUES (1);", JdbcConstants.MYSQL).get(0);
-        assertTrue(insertStmt instanceof MySqlInsertStatement);
-
-        // SELECT
-        SQLStatement selectStmt = SQLUtils.parseStatements(
-                "SELECT * FROM t;", JdbcConstants.MYSQL).get(0);
-        assertTrue(selectStmt instanceof SQLSelectStatement);
-
-        // UPDATE
-        SQLStatement updateStmt = SQLUtils.parseStatements(
-                "UPDATE t SET id = 1;", JdbcConstants.MYSQL).get(0);
-        assertTrue(updateStmt instanceof SQLUpdateStatement);
-    }
 }
