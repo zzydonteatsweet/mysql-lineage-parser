@@ -64,6 +64,13 @@ public class ColumnInfo {
      */
     private List<String> constraints;
 
+    /**
+     * 来源列链路（子查询穿透用）
+     * 物理表列为 null，子查询派生列指向子查询内部的源列，形成链式追溯
+     * 例如：query_result.col1 → [a.col1 → [table_c.col3]]
+     */
+    private List<ColumnInfo> sourceColumns;
+
     public ColumnInfo(TableInfo table, String columnName) {
         this.table = table;
         this.columnName = columnName;

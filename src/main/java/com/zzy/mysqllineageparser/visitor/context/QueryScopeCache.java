@@ -1,10 +1,13 @@
 package com.zzy.mysqllineageparser.visitor.context;
 
+import com.zzy.mysqllineageparser.model.ColumnInfo;
 import com.zzy.mysqllineageparser.model.TableInfo;
 import lombok.Data;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 查询作用域缓存结构体
@@ -43,6 +46,12 @@ public class QueryScopeCache {
      */
     private List<TableInfo> involvedTables = new ArrayList<>();
 
+    /**
+     * 子查询输出列名 → 对应的 ColumnInfo（带 sourceColumns 链路）
+     * 用于外层查询穿透子查询边界追溯物理源列
+     */
+    private Map<String, ColumnInfo> outputColumnMap = new LinkedHashMap<>();
+
     public void addInvolvedTable(TableInfo table) {
         if (involvedTables == null) {
             involvedTables = new ArrayList<>();
@@ -58,6 +67,29 @@ public class QueryScopeCache {
         }
         if (subScope != null) {
             subQueryCache.add(subScope);
+        }
+    }
+
+    /**
+     * 添加子查询输出列映射
+     */
+    public void addOutputColumn(String colName, ColumnInfo colInfo) {
+        outputColumnMap.put(colName, colInfo);
+    }
+
+    /**
+     * 获取子查询输出列信息
+     */
+    public ColumnInfo getOutputColumn(String colName) {
+        return outputColumnMap.get(colName);
+    }
+
+    /**
+     * 从另一个 scope 复制输出列映射（用于子查询 scope → 派生表 scope 的传递）
+     */
+    public void copyOutputColumnsFrom(QueryScopeCache other) {
+        if (other != null && other.outputColumnMap != null) {
+            this.outputColumnMap.putAll(other.outputColumnMap);
         }
     }
 }

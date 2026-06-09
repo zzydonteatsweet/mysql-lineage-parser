@@ -35,7 +35,8 @@ public class SelectParseStrategy implements StatementParseStrategy {
 
             // 2. 创建 Visitor 并遍历 AST
             SQLSelectStatement selectStmt = (SQLSelectStatement) stmt;
-            SelectLineageVisitor visitor = new SelectLineageVisitor(result);
+            String defaultDatabase = context != null ? context.getDefaultDatabase() : null;
+            SelectLineageVisitor visitor = new SelectLineageVisitor(result, defaultDatabase);
             selectStmt.accept(visitor);
         } catch (Exception e) {
             throw new RuntimeException("解析 SELECT 语句失败: " + e.getMessage(), e);

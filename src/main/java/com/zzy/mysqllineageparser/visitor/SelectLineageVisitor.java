@@ -30,8 +30,9 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
 
     /**
      * FROM 表来源缓存：Key=库名/表名/别名，Value=查询作用域缓存
+     * 每个查询块使用独立的缓存，通过 save/restore 保证嵌套子查询不会破坏外层缓存
      */
-    private final Map<TableSourceKey, QueryScopeCache> tableSourceCache = new LinkedHashMap<>();
+    private Map<TableSourceKey, QueryScopeCache> tableSourceCache = new LinkedHashMap<>();
 
     /**
      * 当前查询块作用域
@@ -46,12 +47,22 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
     /**
      * 输出表（根查询结果集）
      */
+    /**
+     * 默认数据库名称（当表名无库前缀时使用）
+     */
+    private final String defaultDatabase;
+
     private TableInfo outputTable;
 
     private final AtomicInteger nodeIdSeq = new AtomicInteger(0);
 
-    public SelectLineageVisitor(LineageResult lineageResult) {
+    public SelectLineageVisitor(LineageResult lineageResult, String defaultDatabase) {
         this.lineageResult = lineageResult;
+        this.defaultDatabase = defaultDatabase;
+    }
+
+    public SelectLineageVisitor(LineageResult lineageResult) {
+        this(lineageResult, null);
     }
 
     @Override
@@ -64,16 +75,19 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
 
     /**
      * 手动控制子节点访问顺序：FROM → SELECT → WHERE
+     * 每个查询块使用独立的 tableSourceCache，避免嵌套子查询破坏外层缓存
      */
     @Override
     public boolean visit(MySqlSelectQueryBlock x) {
-        tableSourceCache.clear();
+        // 保存外层缓存，为当前查询块创建独立缓存
+        Map<TableSourceKey, QueryScopeCache> outerCache = this.tableSourceCache;
+        this.tableSourceCache = new LinkedHashMap<>();
 
         QueryScopeCache parentScope = currentScope;
         currentScope = createQueryScope(parentScope, "query_result");
         lastQueryBlockScope = currentScope;
 
-        // 1. 先访问 FROM，将表来源写入 tableSourceCache
+        // 1. 先访问 FROM，将表来源写入当前层的 tableSourceCache
         if (x.getFrom() != null) {
             collectFromAndCache(x.getFrom(), currentScope);
         }
@@ -87,6 +101,8 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
         }
 
         currentScope = parentScope;
+        // 恢复外层缓存
+        this.tableSourceCache = outerCache;
         return false;
     }
 
@@ -153,6 +169,8 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
             if (lastQueryBlockScope != null) {
                 cache.addSubQueryCache(lastQueryBlockScope);
                 mergeInvolvedTables(cache, lastQueryBlockScope.getInvolvedTables());
+                // 将内层查询的输出列传递到派生表 scope，供外层穿透查找
+                cache.copyOutputColumnsFrom(lastQueryBlockScope);
             }
             currentScope = savedScope;
         }
@@ -196,6 +214,17 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
             ColumnLineage lineage = new ColumnLineage(outputColumn, outputTable);
             resolveSourceColumns(expr, lineage);
 
+            // 将 lineage 中的源列信息填充到 outputColumn 的 sourceColumns，
+            // 供外层查询穿透子查询边界追溯物理源列
+            if (lineage.getSourceColumns() != null && !lineage.getSourceColumns().isEmpty()) {
+                outputColumn.setSourceColumns(new ArrayList<>(lineage.getSourceColumns()));
+            }
+
+            // 存入当前 scope，外层可通过 scope.getOutputColumn() 查找
+            if (currentScope != null) {
+                currentScope.addOutputColumn(outputColumnName, outputColumn);
+            }
+
             lineageResult.addColumnLineage(lineage);
         }
     }
@@ -213,26 +242,36 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
         }
     }
 
+    /**
+     * 去除标识符两端的反引号
+     */
+    private String stripBackticks(String name) {
+        if (name != null && name.startsWith("`") && name.endsWith("`") && name.length() >= 2) {
+            return name.substring(1, name.length() - 1);
+        }
+        return name;
+    }
+
     private TableInfo extractTableInfo(SQLExpr expr, String alias) {
         if (expr instanceof SQLPropertyExpr) {
             SQLPropertyExpr prop = (SQLPropertyExpr) expr;
-            String db = prop.getOwner() != null ? prop.getOwner().toString() : null;
-            return new TableInfo(db, prop.getName(), alias);
+            String db = prop.getOwner() != null ? stripBackticks(prop.getOwner().toString()) : null;
+            return new TableInfo(db, stripBackticks(prop.getName()), alias);
         } else if (expr instanceof SQLIdentifierExpr) {
-            return new TableInfo(null, ((SQLIdentifierExpr) expr).getName(), alias);
+            return new TableInfo(defaultDatabase, stripBackticks(((SQLIdentifierExpr) expr).getName()), alias);
         }
         return null;
     }
 
     private String resolveOutputColumnName(SQLExpr expr, String alias) {
         if (alias != null && !alias.isEmpty()) {
-            return alias;
+            return stripBackticks(alias);
         }
         if (expr instanceof SQLIdentifierExpr) {
-            return ((SQLIdentifierExpr) expr).getName();
+            return stripBackticks(((SQLIdentifierExpr) expr).getName());
         }
         if (expr instanceof SQLPropertyExpr) {
-            return ((SQLPropertyExpr) expr).getName();
+            return stripBackticks(((SQLPropertyExpr) expr).getName());
         }
         if (expr instanceof SQLAllColumnExpr) {
             return "*";
@@ -242,16 +281,12 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
 
     private void resolveSourceColumns(SQLExpr expr, ColumnLineage lineage) {
         if (expr instanceof SQLIdentifierExpr) {
-            String colName = ((SQLIdentifierExpr) expr).getName();
-            TableInfo tableInfo = resolveSingleTable();
-            lineage.addSourceColumn(new ColumnInfo(tableInfo, colName));
+            String colName = stripBackticks(((SQLIdentifierExpr) expr).getName());
+            lineage.addSourceColumn(resolveColumnReference(null, colName));
             lineage.setTransformation("direct mapping");
         } else if (expr instanceof SQLPropertyExpr) {
             SQLPropertyExpr prop = (SQLPropertyExpr) expr;
-            String owner = prop.getOwner().toString();
-            String colName = prop.getName();
-            TableInfo tableInfo = resolveTableByReference(owner);
-            lineage.addSourceColumn(new ColumnInfo(tableInfo, colName));
+            lineage.addSourceColumn(resolveColumnReference(stripBackticks(prop.getOwner().toString()), stripBackticks(prop.getName())));
             lineage.setTransformation("direct mapping");
         } else if (expr instanceof SQLAllColumnExpr) {
             lineage.setTransformation("SELECT *");
@@ -297,11 +332,9 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
         }
         if (expr instanceof SQLPropertyExpr) {
             SQLPropertyExpr prop = (SQLPropertyExpr) expr;
-            TableInfo tableInfo = resolveTableByReference(prop.getOwner().toString());
-            columns.add(new ColumnInfo(tableInfo, prop.getName()));
+            columns.add(resolveColumnReference(stripBackticks(prop.getOwner().toString()), stripBackticks(prop.getName())));
         } else if (expr instanceof SQLIdentifierExpr) {
-            TableInfo tableInfo = resolveSingleTable();
-            columns.add(new ColumnInfo(tableInfo, ((SQLIdentifierExpr) expr).getName()));
+            columns.add(resolveColumnReference(null, stripBackticks(((SQLIdentifierExpr) expr).getName())));
         } else if (expr instanceof SQLBinaryOpExpr) {
             SQLBinaryOpExpr binary = (SQLBinaryOpExpr) expr;
             collectReferencedColumns(binary.getLeft(), columns);
@@ -314,6 +347,72 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
                 }
             }
         }
+    }
+
+    /**
+     * 统一的列引用解析入口：支持子查询穿透
+     *
+     * @param tableRef 表引用（别名或表名），null 表示单表无前缀场景
+     * @param colName  列名
+     * @return ColumnInfo（可能带 sourceColumns 链路追溯到物理表）
+     */
+    private ColumnInfo resolveColumnReference(String tableRef, String colName) {
+        if (tableRef != null) {
+            // 有表前缀：a.col1 → 先尝试子查询穿透，否则走物理表解析
+            ColumnInfo subqueryCol = tryResolveSubqueryColumn(tableRef, colName);
+            if (subqueryCol != null) {
+                return subqueryCol;
+            }
+            TableInfo tableInfo = resolveTableByReference(tableRef);
+            return new ColumnInfo(tableInfo, colName);
+        } else {
+            // 无表前缀：col1（单表场景）→ 先尝试子查询穿透
+            ColumnInfo subqueryCol = tryResolveSubqueryColumnSingleTable(colName);
+            if (subqueryCol != null) {
+                return subqueryCol;
+            }
+            TableInfo tableInfo = resolveSingleTable();
+            return new ColumnInfo(tableInfo, colName);
+        }
+    }
+
+    /**
+     * 有表前缀时，尝试从子查询 scope 的 outputColumnMap 查找列
+     */
+    private ColumnInfo tryResolveSubqueryColumn(String tableRef, String colName) {
+        for (Map.Entry<TableSourceKey, QueryScopeCache> entry : tableSourceCache.entrySet()) {
+            if (tableRef.equals(entry.getKey().getReferenceName())) {
+                return lookupSubqueryColumn(entry.getKey(), entry.getValue(), colName);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 单表无前缀时，尝试从唯一表的子查询 scope 查找列
+     */
+    private ColumnInfo tryResolveSubqueryColumnSingleTable(String colName) {
+        if (tableSourceCache.size() == 1) {
+            Map.Entry<TableSourceKey, QueryScopeCache> entry =
+                    tableSourceCache.entrySet().iterator().next();
+            return lookupSubqueryColumn(entry.getKey(), entry.getValue(), colName);
+        }
+        return null;
+    }
+
+    /**
+     * 在子查询 scope 的 outputColumnMap 中查找列，返回带 sourceColumns 链路的 ColumnInfo
+     */
+    private ColumnInfo lookupSubqueryColumn(TableSourceKey key, QueryScopeCache scope, String colName) {
+        ColumnInfo innerCol = scope.getOutputColumn(colName);
+        if (innerCol != null && innerCol.getSourceColumns() != null
+                && !innerCol.getSourceColumns().isEmpty()) {
+            // 构建子查询列 ColumnInfo，携带 sourceColumns 链路
+            ColumnInfo result = new ColumnInfo(key.toTableInfo(), colName);
+            result.setSourceColumns(new ArrayList<>(innerCol.getSourceColumns()));
+            return result;
+        }
+        return null;
     }
 
     /**

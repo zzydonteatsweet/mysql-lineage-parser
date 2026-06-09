@@ -383,4 +383,235 @@ class SelectLineageParserImplTest {
         assertNotNull(result.getColumnLineages());
         assertEquals(3, result.getColumnLineages().size());
     }
+
+    // ========== 子查询 ==========
+
+    @Test
+    void testSelectFromSubquery() {
+        String sql = "SELECT t.id, t.name FROM (SELECT id, name FROM users) t;";
+
+        LineageResult result = parser.parse(sql);
+
+        assertNotNull(result);
+        assertEquals("SELECT", result.getSqlType());
+        assertEquals(1, result.getInputTables().size());
+        assertEquals("users", result.getInputTables().get(0).getTableName());
+
+        // 验证列血缘
+        assertNotNull(result.getColumnLineages());
+        assertEquals(2, result.getColumnLineages().size());
+
+        assertEquals("id", result.getColumnLineages().get(0).getOutputColumn().getColumnName());
+        assertEquals("name", result.getColumnLineages().get(1).getOutputColumn().getColumnName());
+    }
+
+    @Test
+    void testSelectFromSubqueryWithAlias() {
+        String sql = "SELECT t.user_id, t.user_name " +
+                "FROM (SELECT id AS user_id, name AS user_name FROM users) t;";
+
+        LineageResult result = parser.parse(sql);
+
+        assertNotNull(result);
+        assertEquals("SELECT", result.getSqlType());
+        assertEquals(1, result.getInputTables().size());
+        assertEquals("users", result.getInputTables().get(0).getTableName());
+
+        // 验证列血缘
+        assertNotNull(result.getColumnLineages());
+        assertEquals(2, result.getColumnLineages().size());
+
+        ColumnLineage idLineage = result.getColumnLineages().get(0);
+        assertEquals("user_id", idLineage.getOutputColumn().getColumnName());
+
+        ColumnLineage nameLineage = result.getColumnLineages().get(1);
+        assertEquals("user_name", nameLineage.getOutputColumn().getColumnName());
+    }
+
+    @Test
+    void testSelectFromSubqueryWithWhere() {
+        String sql = "SELECT t.id, t.name FROM (SELECT id, name FROM users WHERE age > 18) t WHERE t.id > 100;";
+
+        LineageResult result = parser.parse(sql);
+
+        assertNotNull(result);
+        assertEquals("SELECT", result.getSqlType());
+        assertEquals(1, result.getInputTables().size());
+        assertEquals("users", result.getInputTables().get(0).getTableName());
+
+        // 验证列血缘
+        assertNotNull(result.getColumnLineages());
+        assertEquals(2, result.getColumnLineages().size());
+
+        // 验证外层 WHERE 过滤条件
+        ColumnLineage lineage = result.getColumnLineages().get(0);
+        assertNotNull(lineage.getFilterCondition());
+        assertTrue(lineage.getFilterCondition().contains("id"));
+    }
+
+    @Test
+    void testSelectFromSubqueryWithExpression() {
+        String sql = "SELECT t.total FROM (SELECT id, salary * 1.1 AS total FROM employees) t;";
+
+        LineageResult result = parser.parse(sql);
+
+        assertNotNull(result);
+        assertEquals("SELECT", result.getSqlType());
+        assertEquals(1, result.getInputTables().size());
+        assertEquals("employees", result.getInputTables().get(0).getTableName());
+
+        // 验证列血缘
+        assertNotNull(result.getColumnLineages());
+        assertEquals(1, result.getColumnLineages().size());
+
+        ColumnLineage lineage = result.getColumnLineages().get(0);
+        assertEquals("total", lineage.getOutputColumn().getColumnName());
+
+        // 验证来源列包含 salary（通过子查询穿透）
+        List<String> sourceColNames = new ArrayList<>();
+        for (ColumnInfo col : lineage.getSourceColumns()) {
+            sourceColNames.add(col.getColumnName());
+        }
+        assertTrue(sourceColNames.contains("salary"));
+    }
+
+    // ========== 子查询 + JOIN ==========
+
+    @Test
+    void testSubqueryJoinTable() {
+        String sql = "SELECT t.user_name, o.amount " +
+                "FROM (SELECT id, name AS user_name FROM users) t " +
+                "JOIN orders o ON t.id = o.user_id;";
+
+        LineageResult result = parser.parse(sql);
+
+        assertNotNull(result);
+        assertEquals("SELECT", result.getSqlType());
+        assertEquals(2, result.getInputTables().size());
+
+        List<String> inputTableNames = result.getInputTableNames();
+        assertTrue(inputTableNames.contains("users"));
+        assertTrue(inputTableNames.contains("orders"));
+
+        // 验证列血缘
+        assertNotNull(result.getColumnLineages());
+        assertEquals(2, result.getColumnLineages().size());
+
+        assertEquals("user_name", result.getColumnLineages().get(0).getOutputColumn().getColumnName());
+        assertEquals("amount", result.getColumnLineages().get(1).getOutputColumn().getColumnName());
+    }
+
+    @Test
+    void testTableJoinSubquery() {
+        String sql = "SELECT u.name, t.total " +
+                "FROM users u " +
+                "JOIN (SELECT user_id, SUM(amount) AS total FROM orders GROUP BY user_id) t " +
+                "ON u.id = t.user_id;";
+
+        LineageResult result = parser.parse(sql);
+
+        assertNotNull(result);
+        assertEquals("SELECT", result.getSqlType());
+        assertEquals(2, result.getInputTables().size());
+
+        List<String> inputTableNames = result.getInputTableNames();
+        assertTrue(inputTableNames.contains("users"));
+        assertTrue(inputTableNames.contains("orders"));
+
+        // 验证列血缘
+        assertNotNull(result.getColumnLineages());
+        assertEquals(2, result.getColumnLineages().size());
+
+        assertEquals("name", result.getColumnLineages().get(0).getOutputColumn().getColumnName());
+        assertEquals("total", result.getColumnLineages().get(1).getOutputColumn().getColumnName());
+    }
+
+    @Test
+    void testSubqueryJoinSubquery() {
+        String sql = "SELECT u.name, o.total " +
+                "FROM (SELECT id, name FROM users) u " +
+                "JOIN (SELECT user_id, SUM(amount) AS total FROM orders GROUP BY user_id) o " +
+                "ON u.id = o.user_id;";
+
+        LineageResult result = parser.parse(sql);
+
+        assertNotNull(result);
+        assertEquals("SELECT", result.getSqlType());
+        assertEquals(2, result.getInputTables().size());
+
+        List<String> inputTableNames = result.getInputTableNames();
+        assertTrue(inputTableNames.contains("users"));
+        assertTrue(inputTableNames.contains("orders"));
+
+        // 验证列血缘
+        assertNotNull(result.getColumnLineages());
+        assertEquals(2, result.getColumnLineages().size());
+
+        // 验证 name 的来源列
+        ColumnLineage nameLineage = result.getColumnLineages().get(0);
+        assertEquals("name", nameLineage.getOutputColumn().getColumnName());
+        assertNotNull(nameLineage.getSourceColumns());
+        assertEquals(1, nameLineage.getSourceColumns().size());
+        assertEquals("name", nameLineage.getSourceColumns().get(0).getColumnName());
+
+        // 验证 total 的来源列和聚合转换
+        ColumnLineage totalLineage = result.getColumnLineages().get(1);
+        assertEquals("total", totalLineage.getOutputColumn().getColumnName());
+        assertNotNull(totalLineage.getSourceColumns());
+        assertEquals(1, totalLineage.getSourceColumns().size());
+        assertEquals("amount", totalLineage.getSourceColumns().get(0).getColumnName());
+        assertNotNull(totalLineage.getTransformation());
+        assertTrue(totalLineage.getTransformation().toUpperCase().contains("SUM"));
+    }
+
+    @Test
+    void testSubqueryLeftJoinWithWhere() {
+        String sql = "SELECT e.name, s.avg_salary " +
+                "FROM employees e " +
+                "LEFT JOIN (SELECT dept_id, AVG(salary) AS avg_salary FROM employees GROUP BY dept_id) s " +
+                "ON e.dept_id = s.dept_id " +
+                "WHERE e.status = 1;";
+
+        LineageResult result = parser.parse(sql);
+
+        assertNotNull(result);
+        assertEquals("SELECT", result.getSqlType());
+        assertEquals(1, result.getInputTables().size());
+        assertEquals("employees", result.getInputTables().get(0).getTableName());
+
+        // 验证列血缘
+        assertNotNull(result.getColumnLineages());
+        assertEquals(2, result.getColumnLineages().size());
+
+        assertEquals("name", result.getColumnLineages().get(0).getOutputColumn().getColumnName());
+        assertEquals("avg_salary", result.getColumnLineages().get(1).getOutputColumn().getColumnName());
+
+        // 验证 WHERE 过滤条件
+        ColumnLineage lineage = result.getColumnLineages().get(0);
+        assertNotNull(lineage.getFilterCondition());
+        assertTrue(lineage.getFilterCondition().contains("status"));
+    }
+
+    // ========== 通配符 + 具体字段 + 表与子查询混合 ==========
+
+    @Test
+    void testSelectWithWildcardAndSpecificColumnsFromTableAndSubquery() {
+        String sql = "SELECT t.*, o.amount, o.status "
+                + "FROM (SELECT * FROM users) t "
+                + "JOIN orders o ON t.id = o.user_id;";
+
+        LineageResult result = parser.parse(sql);
+
+        assertNotNull(result);
+        assertEquals("SELECT", result.getSqlType());
+        assertEquals(2, result.getInputTables().size());
+
+        List<String> inputTableNames = result.getInputTableNames();
+        assertTrue(inputTableNames.contains("users"));
+        assertTrue(inputTableNames.contains("orders"));
+
+        // 通配符展开或保留，验证结果不为空
+        assertNotNull(result.getColumnLineages());
+        assertTrue(result.getColumnLineages().size() >= 2);
+    }
 }
