@@ -117,9 +117,11 @@ public class LineageResult {
         Map<TableInfo, List<ColumnLineage>> result = new HashMap<>();
         if (columnLineages != null) {
             for (ColumnLineage lineage : columnLineages) {
-                TableInfo outputTable = lineage.getOutputTable();
-                if (outputTable != null) {
-                    result.computeIfAbsent(outputTable, k -> new ArrayList<>()).add(lineage);
+                List<TableInfo> outputTables = lineage.getOutputTables();
+                if (outputTables != null) {
+                    for (TableInfo outputTable : outputTables) {
+                        result.computeIfAbsent(outputTable, k -> new ArrayList<>()).add(lineage);
+                    }
                 }
             }
         }

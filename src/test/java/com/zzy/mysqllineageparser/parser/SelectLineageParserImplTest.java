@@ -31,7 +31,7 @@ class SelectLineageParserImplTest {
         List<StatementParseStrategy> strategies = new ArrayList<>();
         strategies.add(new CreateTableParseStrategy());
         strategies.add(new InsertParseStrategy());
-        strategies.add(new SelectParseStrategy());
+        strategies.add(new SelectParseStrategy(null));
         strategies.add(new UpdateParseStrategy());
         strategies.add(new DeleteParseStrategy());
 
@@ -612,6 +612,39 @@ class SelectLineageParserImplTest {
 
         // 通配符展开或保留，验证结果不为空
         assertNotNull(result.getColumnLineages());
-        assertTrue(result.getColumnLineages().size() >= 2);
+        assertTrue(result.getColumnLineages().size() >= 3);
+
+        // 收集所有输出列名，便于按名称断言
+        List<String> outputColNames = new ArrayList<>();
+        for (ColumnLineage cl : result.getColumnLineages()) {
+            outputColNames.add(cl.getOutputColumn().getColumnName());
+        }
+
+        // 1) t.* 通配符：输出列名为 "*"，transformation 为 "SELECT *"
+        ColumnLineage wildcardLineage = result.getColumnLineages().stream()
+                .filter(cl -> "*".equals(cl.getOutputColumn().getColumnName()))
+                .findFirst().orElse(null);
+        assertNotNull(wildcardLineage, "应存在通配符 t.* 的列血缘");
+        assertEquals("SELECT *", wildcardLineage.getTransformation());
+
+        // 2) o.amount：来源为 orders.amount，直接映射
+        ColumnLineage amountLineage = result.getColumnLineages().stream()
+                .filter(cl -> "amount".equals(cl.getOutputColumn().getColumnName()))
+                .findFirst().orElse(null);
+        assertNotNull(amountLineage, "应存在 amount 列血缘");
+        assertEquals("direct mapping", amountLineage.getTransformation());
+        assertEquals(1, amountLineage.getSourceColumns().size());
+        assertEquals("amount", amountLineage.getSourceColumns().get(0).getColumnName());
+        assertEquals("orders", amountLineage.getSourceColumns().get(0).getTable().getTableName());
+
+        // 3) o.status：来源为 orders.status，直接映射
+        ColumnLineage statusLineage = result.getColumnLineages().stream()
+                .filter(cl -> "status".equals(cl.getOutputColumn().getColumnName()))
+                .findFirst().orElse(null);
+        assertNotNull(statusLineage, "应存在 status 列血缘");
+        assertEquals("direct mapping", statusLineage.getTransformation());
+        assertEquals(1, statusLineage.getSourceColumns().size());
+        assertEquals("status", statusLineage.getSourceColumns().get(0).getColumnName());
+        assertEquals("orders", statusLineage.getSourceColumns().get(0).getTable().getTableName());
     }
 }

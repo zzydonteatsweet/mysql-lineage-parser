@@ -37,13 +37,20 @@ public class ColumnLineage {
     private String filterCondition;
 
     /**
-     * 输出表
+     * 输出表（支持多表场景，如 UNION ALL、多源列未匹配时）
      */
-    private TableInfo outputTable;
+    private List<TableInfo> outputTables;
+
+    public ColumnLineage(ColumnInfo outputColumn, List<TableInfo> outputTables) {
+        this.outputColumn = outputColumn;
+        this.outputTables = outputTables;
+        this.sourceColumns = new ArrayList<>();
+    }
 
     public ColumnLineage(ColumnInfo outputColumn, TableInfo outputTable) {
         this.outputColumn = outputColumn;
-        this.outputTable = outputTable;
+        this.outputTables = new ArrayList<>();
+        this.outputTables.add(outputTable);
         this.sourceColumns = new ArrayList<>();
     }
 

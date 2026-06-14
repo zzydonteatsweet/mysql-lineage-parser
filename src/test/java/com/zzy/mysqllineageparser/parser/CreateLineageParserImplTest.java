@@ -30,7 +30,7 @@ class CreateLineageParserImplTest {
         List<StatementParseStrategy> strategies = new ArrayList<>();
         strategies.add(new CreateTableParseStrategy());
         strategies.add(new InsertParseStrategy());
-        strategies.add(new SelectParseStrategy());
+        strategies.add(new SelectParseStrategy(null));
         strategies.add(new UpdateParseStrategy());
         strategies.add(new DeleteParseStrategy());
 

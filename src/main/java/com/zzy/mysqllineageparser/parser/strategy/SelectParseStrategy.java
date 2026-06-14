@@ -4,9 +4,11 @@ import com.alibaba.druid.sql.SQLUtils;
 import com.alibaba.druid.sql.ast.SQLStatement;
 import com.alibaba.druid.sql.ast.statement.SQLSelectStatement;
 import com.alibaba.druid.util.JdbcConstants;
+import com.zzy.mysqllineageparser.mybatis.support.TableMetaSupport;
 import com.zzy.mysqllineageparser.model.LineageResult;
 import com.zzy.mysqllineageparser.parser.ParseContext;
 import com.zzy.mysqllineageparser.visitor.SelectLineageVisitor;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -16,6 +18,13 @@ import java.util.List;
  */
 @Component
 public class SelectParseStrategy implements StatementParseStrategy {
+
+    private final TableMetaSupport tableMetaSupport;
+
+    @Autowired
+    public SelectParseStrategy(TableMetaSupport tableMetaSupport) {
+        this.tableMetaSupport = tableMetaSupport;
+    }
 
     @Override
     public LineageResult parse(String sql, ParseContext context) {
@@ -35,8 +44,8 @@ public class SelectParseStrategy implements StatementParseStrategy {
 
             // 2. 创建 Visitor 并遍历 AST
             SQLSelectStatement selectStmt = (SQLSelectStatement) stmt;
-            String defaultDatabase = context != null ? context.getDefaultDatabase() : null;
-            SelectLineageVisitor visitor = new SelectLineageVisitor(result, defaultDatabase);
+            String defaultDatabase = context != null ? context.getDefaultDatabase() : "default";
+            SelectLineageVisitor visitor = new SelectLineageVisitor(result, defaultDatabase, tableMetaSupport);
             selectStmt.accept(visitor);
         } catch (Exception e) {
             throw new RuntimeException("解析 SELECT 语句失败: " + e.getMessage(), e);
