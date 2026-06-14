@@ -248,8 +248,10 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
 
             String outputColumnName = resolveOutputColumnName(expr, alias);
 
-            // 构建列血缘并关联列与来源表
-            ColumnLineage lineage = resolveColumnSourceTables(outputColumnName);
+            // 通配符 (* / t.*) 走单独展开逻辑；具名列走表来源解析
+            ColumnLineage lineage = isWildcardExpr(expr)
+                    ? resolveWildcardColumn(expr)
+                    : resolveColumnSourceTables(outputColumnName);
 
             queryLineages.add(lineage);
 
@@ -406,33 +408,85 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
         }
     }
 
-    private void resolveSourceColumns(SQLExpr expr, ColumnLineage lineage) {
-        if (expr instanceof SQLIdentifierExpr) {
-            String colName = stripBackticks(((SQLIdentifierExpr) expr).getName());
-            // 尝试子查询穿透（单表无前缀场景）
-            if (tryResolveSubqueryColumn(null, colName, lineage)) {
-                return;
+    /**
+     * 判断是否为通配符表达式：裸 *（SQLAllColumnExpr）或 table.*（SQLPropertyExpr 且 name 为 *）
+     */
+    private boolean isWildcardExpr(SQLExpr expr) {
+        if (expr instanceof SQLAllColumnExpr) {
+            return true;
+        }
+        if (expr instanceof SQLPropertyExpr) {
+            return "*".equals(stripBackticks(((SQLPropertyExpr) expr).getName()));
+        }
+        return false;
+    }
+
+    /**
+     * 解析通配符列血缘：outputColumn="*"、transformation="SELECT *"，
+     * sourceColumns 按用户确认规则从元数据展开。
+     * <p>
+     * - 裸 *  ：展开为当前查询块所有来源（含子查询派生表解析到底层物理表）的全部列
+     * - t.*  ：经 map 按引用解析 t 涉及的物理表，展开其全部列
+     * 元数据不可用（tableMetaSupport 为 null）时仅保留通配符血缘本身，sourceColumns 为空
+     *
+     * @param expr 通配符表达式（SQLAllColumnExpr 或 name 为 * 的 SQLPropertyExpr）
+     * @return 构建好的通配符列血缘对象
+     */
+    private ColumnLineage resolveWildcardColumn(SQLExpr expr) {
+        ColumnLineage lineage = new ColumnLineage(new ColumnInfo(null, "*"), (TableInfo) null);
+        lineage.setTransformation("SELECT *");
+
+        List<TableInfo> tablesToExpand = expr instanceof SQLAllColumnExpr
+                ? collectAllInvolvedTables()
+                : collectInvolvedTablesByReference(stripBackticks(((SQLPropertyExpr) expr).getOwner().toString()));
+
+        expandColumnsFromMetadata(tablesToExpand, lineage);
+        return lineage;
+    }
+
+    /**
+     * 裸 * 场景：收集当前查询块所有来源涉及的物理表（子查询派生表解析到底层），按全名去重
+     */
+    private List<TableInfo> collectAllInvolvedTables() {
+        LinkedHashMap<String, TableInfo> deduped = new LinkedHashMap<>();
+        for (QueryScopeCache cache : tableSourceCacheMap.values()) {
+            List<TableInfo> involved = cache.getInvolvedTables();
+            if (involved == null) {
+                continue;
             }
-            TableInfo tableInfo = resolveSingleTable();
-            lineage.addSourceColumn(new ColumnInfo(tableInfo, colName));
-            lineage.setTransformation("direct mapping");
-        } else if (expr instanceof SQLPropertyExpr) {
-            SQLPropertyExpr prop = (SQLPropertyExpr) expr;
-            String owner = stripBackticks(prop.getOwner().toString());
-            String colName = stripBackticks(prop.getName());
-            // 尝试子查询穿透（有表前缀场景）
-            if (tryResolveSubqueryColumn(owner, colName, lineage)) {
-                return;
+            for (TableInfo table : involved) {
+                deduped.put(table.getFullName(), table);
             }
-            TableInfo tableInfo = resolveTableByReference(owner);
-            lineage.addSourceColumn(new ColumnInfo(tableInfo, colName));
-            lineage.setTransformation("direct mapping");
-        } else if (expr instanceof SQLAllColumnExpr) {
-            lineage.setTransformation("SELECT *");
-        } else {
-            lineage.setTransformation(expr.toString());
-            for (ColumnInfo col : extractReferencedColumns(expr)) {
-                lineage.addSourceColumn(col);
+        }
+        return new ArrayList<>(deduped.values());
+    }
+
+    /**
+     * t.* 场景：按别名/表名引用查找对应 scope，返回其涉及的物理表列表
+     */
+    private List<TableInfo> collectInvolvedTablesByReference(String reference) {
+        for (Map.Entry<TableSourceKey, QueryScopeCache> entry : tableSourceCacheMap.entrySet()) {
+            if (reference.equals(entry.getKey().getReferenceName())) {
+                List<TableInfo> involved = entry.getValue().getInvolvedTables();
+                return involved != null ? involved : Collections.emptyList();
+            }
+        }
+        return Collections.emptyList();
+    }
+
+    /**
+     * 从元数据查询每个表的全部列，加入 lineage 的 sourceColumns
+     */
+    private void expandColumnsFromMetadata(List<TableInfo> tables, ColumnLineage lineage) {
+        if (tableMetaSupport == null) {
+            return;
+        }
+        for (TableInfo table : tables) {
+            List<ColumnInfo> columns = tableMetaSupport.getTableColumns(table.getTableName());
+            if (columns != null) {
+                for (ColumnInfo col : columns) {
+                    lineage.addSourceColumn(col);
+                }
             }
         }
     }
