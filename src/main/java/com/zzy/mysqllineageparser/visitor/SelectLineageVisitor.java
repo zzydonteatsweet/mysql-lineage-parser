@@ -54,11 +54,6 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
      */
     private List<ColumnLineage> nowScopeColumnLineages;
 
-    /**
-     * 输出表（根查询结果集）
-     */
-    private TableInfo outputTable;
-
     private final AtomicInteger nodeIdSeq = new AtomicInteger(0);
 
     /**
@@ -253,14 +248,8 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
 
             String outputColumnName = resolveOutputColumnName(expr, alias);
 
-
-            ColumnInfo outputColumn = new ColumnInfo(outputTable, outputColumnName);
-
-            ColumnLineage lineage = new ColumnLineage(outputColumn, outputTable);
-//            resolveSourceColumns(expr, lineage);
-
-            // 关联列与来源表
-            resolveColumnSourceTables(outputColumnName, lineage);
+            // 构建列血缘并关联列与来源表
+            ColumnLineage lineage = resolveColumnSourceTables(outputColumnName);
 
             queryLineages.add(lineage);
 
@@ -323,59 +312,89 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
     }
 
     /**
-     * 解析列所属的来源表，并添加到 lineage 的 sourceColumns 中
+     * 构建列血缘并解析其所属的来源表，写入 lineage 的 sourceColumns
      * <p>
-     * 解析策略（按优先级）：
-     * 1. 从 tableSourceCacheMap 中遍历，检查子查询 outputColumnMap 是否有同名列，有则使用该 key 对应的表
-     * 2. 若未找到，使用 tableMetaSupport 查询每个表的实际字段，有匹配则选择该表
-     * 3. 若仍未找到，将 map 中所有的表作为来源表
+     * 解析策略（按优先级回退）：
+     * 1. 从 tableSourceCacheMap 中遍历，检查子查询 outputColumnMap 是否有同名列
+     * 2. 使用 tableMetaSupport 查询每个表的实际字段，匹配同名列
+     * 3. 以上均未命中，将缓存中所有表作为来源表
      *
      * @param colName 输出列名
-     * @param lineage 待填充的列血缘对象
+     * @return 构建好的列血缘对象
      */
-    private void resolveColumnSourceTables(String colName, ColumnLineage lineage) {
-        List<TableInfo> matchedTables = new ArrayList<>();
+    private ColumnLineage resolveColumnSourceTables(String colName) {
+        ColumnInfo outputColumn = new ColumnInfo(null, colName);
+        ColumnLineage lineage = new ColumnLineage(outputColumn, (TableInfo) null);
 
-        // 策略1：从 tableSourceCacheMap 中遍历，检查 outputColumnMap 是否有同名列
-        for (Map.Entry<TableSourceKey, QueryScopeCache> entry : tableSourceCacheMap.entrySet()) {
-            QueryScopeCache cache = entry.getValue();
-            if (cache.getOutputColumnLineage(colName) != null) {
-                matchedTables.add(entry.getKey().toTableInfo());
-            }
+        // 按优先级依次尝试三种解析策略，命中即用，均未命中则兜底取全部表
+        List<TableInfo> matchedTables = findMatchedTablesByOutputColumn(colName);
+        if (matchedTables.isEmpty()) {
+            matchedTables = findMatchedTablesByTableMeta(colName);
         }
-
-        if (!matchedTables.isEmpty()) {
-            addSourceColumnsForTables(matchedTables, colName, lineage);
-            return;
-        }
-
-        // 策略2：使用 tableMetaSupport 查询每个表的字段
-        if (tableMetaSupport != null) {
-            for (Map.Entry<TableSourceKey, QueryScopeCache> entry : tableSourceCacheMap.entrySet()) {
-                String tableName = entry.getKey().getTableName();
-                List<ColumnInfo> tableColumns = tableMetaSupport.getTableColumns(tableName);
-                if (tableColumns != null) {
-                    for (ColumnInfo col : tableColumns) {
-                        if (colName.equalsIgnoreCase(col.getColumnName())) {
-                            matchedTables.add(entry.getKey().toTableInfo());
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        if (!matchedTables.isEmpty()) {
-            addSourceColumnsForTables(matchedTables, colName, lineage);
-            return;
-        }
-
-        // 策略3：未找到匹配，将 map 中所有的表作为来源表
-        for (TableSourceKey key : tableSourceCacheMap.keySet()) {
-            matchedTables.add(key.toTableInfo());
+        if (matchedTables.isEmpty()) {
+            matchedTables = collectAllCachedTables();
         }
 
         addSourceColumnsForTables(matchedTables, colName, lineage);
+        return lineage;
+    }
+
+    /**
+     * 策略1：遍历 tableSourceCacheMap，检查子查询 outputColumnMap 是否有同名列，
+     * 命中的 key 对应表作为来源表
+     */
+    private List<TableInfo> findMatchedTablesByOutputColumn(String colName) {
+        List<TableInfo> matchedTables = new ArrayList<>();
+        for (Map.Entry<TableSourceKey, QueryScopeCache> entry : tableSourceCacheMap.entrySet()) {
+            if (entry.getValue().getOutputColumnLineage(colName) != null) {
+                matchedTables.add(entry.getKey().toTableInfo());
+            }
+        }
+        return matchedTables;
+    }
+
+    /**
+     * 策略2：通过 tableMetaSupport 查询每个表的实际字段，匹配同名列（忽略大小写）；
+     * tableMetaSupport 为 null 时直接返回空列表
+     */
+    private List<TableInfo> findMatchedTablesByTableMeta(String colName) {
+        List<TableInfo> matchedTables = new ArrayList<>();
+        if (tableMetaSupport == null) {
+            return matchedTables;
+        }
+        for (Map.Entry<TableSourceKey, QueryScopeCache> entry : tableSourceCacheMap.entrySet()) {
+            if (tableHasColumn(entry.getKey().getTableName(), colName)) {
+                matchedTables.add(entry.getKey().toTableInfo());
+            }
+        }
+        return matchedTables;
+    }
+
+    /**
+     * 查询表元数据判断是否包含指定列（忽略大小写）
+     */
+    private boolean tableHasColumn(String tableName, String colName) {
+        List<ColumnInfo> tableColumns = tableMetaSupport.getTableColumns(tableName);
+        if (tableColumns == null) {
+            return false;
+        }
+        for (ColumnInfo col : tableColumns) {
+            if (colName.equalsIgnoreCase(col.getColumnName())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 策略3：未找到匹配时，将 tableSourceCacheMap 中所有表作为来源表
+     */
+    private List<TableInfo> collectAllCachedTables() {
+        List<TableInfo> allTables = new ArrayList<>();
+        for (TableSourceKey key : tableSourceCacheMap.keySet()) {
+            allTables.add(key.toTableInfo());
+        }
+        return allTables;
     }
 
     /**

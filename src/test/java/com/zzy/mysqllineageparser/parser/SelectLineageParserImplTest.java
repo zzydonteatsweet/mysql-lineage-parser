@@ -4,6 +4,7 @@ import com.zzy.mysqllineageparser.model.ColumnInfo;
 import com.zzy.mysqllineageparser.model.ColumnLineage;
 import com.zzy.mysqllineageparser.model.LineageResult;
 import com.zzy.mysqllineageparser.model.TableInfo;
+import com.zzy.mysqllineageparser.mybatis.support.TableMetaSupport;
 import com.zzy.mysqllineageparser.parser.strategy.CreateTableParseStrategy;
 import com.zzy.mysqllineageparser.parser.strategy.DeleteParseStrategy;
 import com.zzy.mysqllineageparser.parser.strategy.InsertParseStrategy;
@@ -15,7 +16,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -82,12 +86,41 @@ class SelectLineageParserImplTest {
     void testSelectAllColumns() {
         String sql = "SELECT * FROM employees;";
 
-        LineageResult result = parser.parse(sql);
+        // 注入 employees 表元数据，列：id / name / salary
+        TableMetaSupport tableMetaSupport = tableName -> "employees".equals(tableName)
+                ? Arrays.asList(
+                        new ColumnInfo(null, "id"),
+                        new ColumnInfo(null, "name"),
+                        new ColumnInfo(null, "salary"))
+                : Collections.emptyList();
+
+        // 构建带元数据的 parser（隔离于共享 parser，不影响其他用例）
+        List<StatementParseStrategy> strategies = new ArrayList<>();
+        strategies.add(new CreateTableParseStrategy());
+        strategies.add(new InsertParseStrategy());
+        strategies.add(new SelectParseStrategy(tableMetaSupport));
+        strategies.add(new UpdateParseStrategy());
+        strategies.add(new DeleteParseStrategy());
+        SqlLineageParser metaParser = new MysqlLineageParserImpl(new ParseStrategyFactory(strategies));
+
+        LineageResult result = metaParser.parse(sql);
 
         assertNotNull(result);
         assertEquals("SELECT", result.getSqlType());
         assertEquals(1, result.getInputTables().size());
         assertEquals("employees", result.getInputTables().get(0).getTableName());
+
+        // 验证列血缘：SELECT * 应展开为 employees 的具体列，而非单个 "*"
+        assertNotNull(result.getColumnLineages());
+        assertEquals(3, result.getColumnLineages().size());
+
+        List<String> outputColumns = result.getColumnLineages().stream()
+                .map(cl -> cl.getOutputColumn().getColumnName())
+                .collect(Collectors.toList());
+        assertTrue(outputColumns.contains("id"), "应展开出 id");
+        assertTrue(outputColumns.contains("name"), "应展开出 name");
+        assertTrue(outputColumns.contains("salary"), "应展开出 salary");
+        assertFalse(outputColumns.contains("*"), "不应残留未展开的 '*'");
     }
 
     // ========== 带别名的 SELECT ==========
