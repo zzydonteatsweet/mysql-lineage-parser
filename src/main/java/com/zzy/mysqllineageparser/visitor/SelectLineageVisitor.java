@@ -425,8 +425,10 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
      * 解析通配符列血缘：outputColumn="*"、transformation="SELECT *"，
      * sourceColumns 按用户确认规则从元数据展开。
      * <p>
-     * - 裸 *  ：展开为当前查询块所有来源（含子查询派生表解析到底层物理表）的全部列
-     * - t.*  ：经 map 按引用解析 t 涉及的物理表，展开其全部列
+     * - 裸 *        ：展开为当前查询块所有来源（含子查询派生表解析到底层物理表）的全部列
+     * - t.*         ：按别名/表名引用解析 t 涉及的物理表，展开其全部列
+     * - db.table.*  ：按 库名.表名 限定解析对应物理表，展开其全部列
+     * - db.*        ：按库名匹配该库下所有来源表，展开其全部列
      * 元数据不可用（tableMetaSupport 为 null）时仅保留通配符血缘本身，sourceColumns 为空
      *
      * @param expr 通配符表达式（SQLAllColumnExpr 或 name 为 * 的 SQLPropertyExpr）
@@ -438,10 +440,88 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
 
         List<TableInfo> tablesToExpand = expr instanceof SQLAllColumnExpr
                 ? collectAllInvolvedTables()
-                : collectInvolvedTablesByReference(stripBackticks(((SQLPropertyExpr) expr).getOwner().toString()));
+                : resolveWildcardOwnerTables((SQLPropertyExpr) expr);
 
         expandColumnsFromMetadata(tablesToExpand, lineage);
         return lineage;
+    }
+
+    /**
+     * 解析带限定的通配符 owner（t.* / db.table.* / db.*）对应的物理来源表。
+     * <p>
+     * Druid 将通配符 owner 解析为：
+     * <ul>
+     *   <li>单级标识符 {@link SQLIdentifierExpr}：t.* / table.* / db.*</li>
+     *   <li>多级属性表达式 {@link SQLPropertyExpr}：db.table.*（owner.toString() 为 "db.table"）</li>
+     * </ul>
+     * 匹配优先级：
+     * <ol>
+     *   <li>db.table.* —— owner 为属性表达式（两级限定），按 库名+表名 精确匹配</li>
+     *   <li>t.* / table.* —— owner 为单级标识符，命中别名/表名引用</li>
+     *   <li>db.* —— owner 为单级标识符但未命中表引用，按库名匹配该库下所有来源表</li>
+     * </ol>
+     *
+     * @param propExpr name 为 * 的属性表达式
+     * @return owner 限定的来源表列表；无法匹配时返回空列表
+     */
+    private List<TableInfo> resolveWildcardOwnerTables(SQLPropertyExpr propExpr) {
+        SQLExpr owner = propExpr.getOwner();
+
+        // 两级限定：db.table.* —— owner 本身是属性表达式，按 库名+表名 精确匹配
+        if (owner instanceof SQLPropertyExpr) {
+            return collectInvolvedTablesByTableInfo(extractTableInfo(owner, null));
+        }
+
+        // 单级标识符：先按别名/表名引用匹配（t.* / table.*），未命中再按库名匹配（db.*）
+        String reference = stripBackticks(owner.toString());
+        List<TableInfo> matched = collectInvolvedTablesByReference(reference);
+        return matched.isEmpty() ? collectInvolvedTablesByDatabase(reference) : matched;
+    }
+
+    /**
+     * db.table.* 场景：按 库名+表名 精确匹配 tableSourceCache 中的来源表，
+     * 返回其涉及的物理表（子查询派生表解析到底层）
+     */
+    private List<TableInfo> collectInvolvedTablesByTableInfo(TableInfo target) {
+        List<TableInfo> result = new ArrayList<>();
+        if (target == null || target.getTableName() == null) {
+            return result;
+        }
+        for (Map.Entry<TableSourceKey, QueryScopeCache> entry : tableSourceCacheMap.entrySet()) {
+            TableSourceKey key = entry.getKey();
+            if (Objects.equals(key.getTableName(), target.getTableName())
+                    && Objects.equals(key.getDatabaseName(), target.getDatabaseName())) {
+                addInvolvedTablesToList(entry.getValue(), result);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * db.* 场景：按库名匹配 tableSourceCache 中该库下的所有来源表，
+     * 返回其涉及的物理表（子查询派生表解析到底层）
+     */
+    private List<TableInfo> collectInvolvedTablesByDatabase(String dbName) {
+        List<TableInfo> result = new ArrayList<>();
+        if (dbName == null || dbName.isEmpty()) {
+            return result;
+        }
+        for (Map.Entry<TableSourceKey, QueryScopeCache> entry : tableSourceCacheMap.entrySet()) {
+            if (dbName.equals(entry.getKey().getDatabaseName())) {
+                addInvolvedTablesToList(entry.getValue(), result);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * 将 scope 涉及的物理表追加到目标列表
+     */
+    private void addInvolvedTablesToList(QueryScopeCache cache, List<TableInfo> target) {
+        if (cache == null || cache.getInvolvedTables() == null) {
+            return;
+        }
+        target.addAll(cache.getInvolvedTables());
     }
 
     /**

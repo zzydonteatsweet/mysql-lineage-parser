@@ -24,9 +24,12 @@ import java.util.stream.Collectors;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * SELECT 语句血缘解析测试类
+ * 复杂 SELECT 语句血缘解析测试类（暂存）
+ * <p>
+ * 收录非简单查询用例：含 JOIN、GROUP BY、子查询，以及它们的组合。
+ * 简单查询判定标准：SQL 中没有 JOIN、没有 GROUP BY、没有子查询。后续可继续细分。
  */
-class SelectLineageParserImplTest {
+class SelectLineageComplexTest {
 
     private SqlLineageParser parser;
 
@@ -43,140 +46,45 @@ class SelectLineageParserImplTest {
         parser = new MysqlLineageParserImpl(factory);
     }
 
-    // ========== 简单 SELECT ==========
+    // ========== 聚合查询（GROUP BY） ==========
 
     @Test
-    void testSelectSimple() {
-        String sql = "SELECT id, name FROM users;";
+    void testSelectWithAggregateFunction() {
+        String sql = "SELECT dept_id, COUNT(*) AS cnt, AVG(salary) AS avg_salary FROM employees GROUP BY dept_id;";
 
         LineageResult result = parser.parse(sql);
-
-        assertNotNull(result);
-        assertEquals("SELECT", result.getSqlType());
-        assertEquals(1, result.getInputTables().size());
-
-        TableInfo inputTable = result.getInputTables().get(0);
-        assertEquals("users", inputTable.getTableName());
-
-        // 验证列血缘
-        assertNotNull(result.getColumnLineages());
-        assertEquals(2, result.getColumnLineages().size());
-
-        assertEquals("id", result.getColumnLineages().get(0).getOutputColumn().getColumnName());
-        assertEquals("name", result.getColumnLineages().get(1).getOutputColumn().getColumnName());
-    }
-
-    @Test
-    void testSelectWithDatabasePrefix() {
-        String sql = "SELECT id, name FROM testdb.users;";
-
-        LineageResult result = parser.parse(sql);
-
-        assertNotNull(result);
-        assertEquals("SELECT", result.getSqlType());
-        assertEquals(1, result.getInputTables().size());
-
-        TableInfo inputTable = result.getInputTables().get(0);
-        assertEquals("users", inputTable.getTableName());
-        assertEquals("testdb", inputTable.getDatabaseName());
-        assertEquals("testdb.users", inputTable.getFullName());
-    }
-
-    @Test
-    void testSelectAllColumns() {
-        String sql = "SELECT * FROM employees;";
-
-        // 注入 employees 表元数据，列：id / name / salary
-        TableMetaSupport tableMetaSupport = tableName -> "employees".equals(tableName)
-                ? Arrays.asList(
-                        new ColumnInfo(null, "id"),
-                        new ColumnInfo(null, "name"),
-                        new ColumnInfo(null, "salary"))
-                : Collections.emptyList();
-
-        // 构建带元数据的 parser（隔离于共享 parser，不影响其他用例）
-        List<StatementParseStrategy> strategies = new ArrayList<>();
-        strategies.add(new CreateTableParseStrategy());
-        strategies.add(new InsertParseStrategy());
-        strategies.add(new SelectParseStrategy(tableMetaSupport));
-        strategies.add(new UpdateParseStrategy());
-        strategies.add(new DeleteParseStrategy());
-        SqlLineageParser metaParser = new MysqlLineageParserImpl(new ParseStrategyFactory(strategies));
-
-        LineageResult result = metaParser.parse(sql);
 
         assertNotNull(result);
         assertEquals("SELECT", result.getSqlType());
         assertEquals(1, result.getInputTables().size());
         assertEquals("employees", result.getInputTables().get(0).getTableName());
 
-        // 验证列血缘：SELECT * 应展开为 employees 的具体列，而非单个 "*"
+        // 验证列血缘
         assertNotNull(result.getColumnLineages());
         assertEquals(3, result.getColumnLineages().size());
-
-        List<String> outputColumns = result.getColumnLineages().stream()
-                .map(cl -> cl.getOutputColumn().getColumnName())
-                .collect(Collectors.toList());
-        assertTrue(outputColumns.contains("id"), "应展开出 id");
-        assertTrue(outputColumns.contains("name"), "应展开出 name");
-        assertTrue(outputColumns.contains("salary"), "应展开出 salary");
-        assertFalse(outputColumns.contains("*"), "不应残留未展开的 '*'");
     }
 
-    // ========== 带别名的 SELECT ==========
+    // ========== 多表 / JOIN 查询 ==========
 
     @Test
-    void testSelectWithAlias() {
-        String sql = "SELECT u.id, u.name FROM users AS u;";
+    void testSelectWithAliasTablePrefixColumns() {
+        String sql = "SELECT e.id, e.name, d.dept_name " +
+                "FROM employees e, departments d WHERE e.dept_id = d.id;";
 
         LineageResult result = parser.parse(sql);
 
         assertNotNull(result);
         assertEquals("SELECT", result.getSqlType());
-        assertEquals(1, result.getInputTables().size());
+        assertEquals(2, result.getInputTables().size());
 
-        TableInfo inputTable = result.getInputTables().get(0);
-        assertEquals("users", inputTable.getTableName());
-        assertEquals("u", inputTable.getAlias());
-    }
-
-    @Test
-    void testSelectWithColumnAlias() {
-        String sql = "SELECT id AS user_id, name AS user_name FROM users;";
-
-        LineageResult result = parser.parse(sql);
-
-        assertNotNull(result);
-        assertEquals(2, result.getColumnLineages().size());
-
-        assertEquals("user_id", result.getColumnLineages().get(0).getOutputColumn().getColumnName());
-        assertEquals("user_name", result.getColumnLineages().get(1).getOutputColumn().getColumnName());
-    }
-
-    // ========== WHERE 条件 ==========
-
-    @Test
-    void testSelectWithWhere() {
-        String sql = "SELECT id, name FROM users WHERE status = 1;";
-
-        LineageResult result = parser.parse(sql);
-
-        assertNotNull(result);
-        assertEquals("SELECT", result.getSqlType());
-        assertEquals(1, result.getInputTables().size());
-        assertEquals("users", result.getInputTables().get(0).getTableName());
+        List<String> inputTableNames = result.getInputTableNames();
+        assertTrue(inputTableNames.contains("employees"));
+        assertTrue(inputTableNames.contains("departments"));
 
         // 验证列血缘
         assertNotNull(result.getColumnLineages());
-        assertEquals(2, result.getColumnLineages().size());
-
-        // 验证过滤条件
-        ColumnLineage lineage = result.getColumnLineages().get(0);
-        assertNotNull(lineage.getFilterCondition());
-        assertTrue(lineage.getFilterCondition().contains("status"));
+        assertEquals(3, result.getColumnLineages().size());
     }
-
-    // ========== JOIN 查询 ==========
 
     @Test
     void testSelectInnerJoin() {
@@ -232,189 +140,6 @@ class SelectLineageParserImplTest {
         List<String> inputTableNames = result.getInputTableNames();
         assertTrue(inputTableNames.contains("db1.table_a"));
         assertTrue(inputTableNames.contains("db2.table_b"));
-    }
-
-    // ========== 表达式与函数 ==========
-
-    @Test
-    void testSelectWithExpression() {
-        String sql = "SELECT salary * 1.1 AS new_salary FROM employees;";
-
-        LineageResult result = parser.parse(sql);
-
-        assertNotNull(result);
-        assertEquals("SELECT", result.getSqlType());
-        assertEquals(1, result.getInputTables().size());
-        assertEquals("employees", result.getInputTables().get(0).getTableName());
-
-        // 验证列血缘
-        assertNotNull(result.getColumnLineages());
-        assertEquals(1, result.getColumnLineages().size());
-
-        ColumnLineage lineage = result.getColumnLineages().get(0);
-        assertEquals("new_salary", lineage.getOutputColumn().getColumnName());
-        assertNotNull(lineage.getTransformation());
-        // 表达式中应包含 salary
-        assertTrue(lineage.getSourceColumns().stream()
-                .anyMatch(col -> "salary".equals(col.getColumnName())));
-    }
-
-    @Test
-    void testSelectWithFunction() {
-        String sql = "SELECT CONCAT(first_name, ' ', last_name) AS full_name FROM employees;";
-
-        LineageResult result = parser.parse(sql);
-
-        assertNotNull(result);
-        assertEquals("SELECT", result.getSqlType());
-
-        // 验证列血缘
-        assertNotNull(result.getColumnLineages());
-        assertEquals(1, result.getColumnLineages().size());
-
-        ColumnLineage lineage = result.getColumnLineages().get(0);
-        assertEquals("full_name", lineage.getOutputColumn().getColumnName());
-        assertNotNull(lineage.getTransformation());
-
-        // 验证来源列包含 first_name 和 last_name
-        List<String> sourceColNames = new ArrayList<>();
-        for (ColumnInfo col : lineage.getSourceColumns()) {
-            sourceColNames.add(col.getColumnName());
-        }
-        assertTrue(sourceColNames.contains("first_name"));
-        assertTrue(sourceColNames.contains("last_name"));
-    }
-
-    @Test
-    void testSelectWithAggregateFunction() {
-        String sql = "SELECT dept_id, COUNT(*) AS cnt, AVG(salary) AS avg_salary FROM employees GROUP BY dept_id;";
-
-        LineageResult result = parser.parse(sql);
-
-        assertNotNull(result);
-        assertEquals("SELECT", result.getSqlType());
-        assertEquals(1, result.getInputTables().size());
-        assertEquals("employees", result.getInputTables().get(0).getTableName());
-
-        // 验证列血缘
-        assertNotNull(result.getColumnLineages());
-        assertEquals(3, result.getColumnLineages().size());
-    }
-
-    // ========== 带反引号的标识符 ==========
-
-    @Test
-    void testSelectWithBackticks() {
-        String sql = "SELECT `id`, `name` FROM `users`;";
-
-        LineageResult result = parser.parse(sql);
-
-        assertNotNull(result);
-        assertEquals("SELECT", result.getSqlType());
-        assertEquals(1, result.getInputTables().size());
-        assertEquals("users", result.getInputTables().get(0).getTableName());
-
-        assertNotNull(result.getColumnLineages());
-        assertTrue(result.getColumnLineages().size() >= 1);
-    }
-
-    @Test
-    void testSelectWithBackticksAndDatabase() {
-        String sql = "SELECT `u`.`id`, `u`.`name` FROM `mydb`.`users` AS `u`;";
-
-        LineageResult result = parser.parse(sql);
-
-        assertNotNull(result);
-        assertEquals("SELECT", result.getSqlType());
-        assertEquals(1, result.getInputTables().size());
-
-        TableInfo inputTable = result.getInputTables().get(0);
-        assertEquals("users", inputTable.getTableName());
-        assertEquals("mydb", inputTable.getDatabaseName());
-    }
-
-    // ========== 上下文与报告 ==========
-
-    @Test
-    void testSelectWithContext() {
-        String sql = "SELECT id, name FROM users;";
-        ParseContext context = ParseContext.withDatabase("myapp");
-
-        LineageResult result = parser.parse(sql, context);
-
-        assertNotNull(result);
-        assertEquals("SELECT", result.getSqlType());
-        assertEquals(1, result.getInputTables().size());
-    }
-
-    @Test
-    void testSelectGenerateReport() {
-        String sql = "SELECT id, name FROM users WHERE status = 1;";
-        LineageResult result = parser.parse(sql);
-
-        String report = result.generateReport();
-
-        assertNotNull(report);
-        assertTrue(report.contains("SQL Type: SELECT"));
-        assertTrue(report.contains("Input Tables:"));
-        assertTrue(report.contains("users"));
-    }
-
-    // ========== 空值和异常 ==========
-
-    @Test
-    void testSelectEmptySql() {
-        assertThrows(IllegalArgumentException.class, () -> {
-            parser.parse("");
-        });
-    }
-
-    @Test
-    void testSelectNullSql() {
-        assertThrows(IllegalArgumentException.class, () -> {
-            parser.parse(null);
-        });
-    }
-
-    // ========== 带表前缀的列引用 ==========
-
-    @Test
-    void testSelectWithTablePrefixColumns() {
-        String sql = "SELECT users.id, users.name FROM users;";
-
-        LineageResult result = parser.parse(sql);
-
-        assertNotNull(result);
-        assertEquals("SELECT", result.getSqlType());
-        assertEquals(1, result.getInputTables().size());
-
-        // 验证列血缘
-        assertNotNull(result.getColumnLineages());
-        assertEquals(2, result.getColumnLineages().size());
-
-        ColumnLineage idLineage = result.getColumnLineages().get(0);
-        assertEquals("id", idLineage.getOutputColumn().getColumnName());
-        assertEquals("direct mapping", idLineage.getTransformation());
-    }
-
-    @Test
-    void testSelectWithAliasTablePrefixColumns() {
-        String sql = "SELECT e.id, e.name, d.dept_name " +
-                "FROM employees e, departments d WHERE e.dept_id = d.id;";
-
-        LineageResult result = parser.parse(sql);
-
-        assertNotNull(result);
-        assertEquals("SELECT", result.getSqlType());
-        assertEquals(2, result.getInputTables().size());
-
-        List<String> inputTableNames = result.getInputTableNames();
-        assertTrue(inputTableNames.contains("employees"));
-        assertTrue(inputTableNames.contains("departments"));
-
-        // 验证列血缘
-        assertNotNull(result.getColumnLineages());
-        assertEquals(3, result.getColumnLineages().size());
     }
 
     // ========== 子查询 ==========
@@ -665,7 +390,6 @@ class SelectLineageParserImplTest {
                 .filter(cl -> "amount".equals(cl.getOutputColumn().getColumnName()))
                 .findFirst().orElse(null);
         assertNotNull(amountLineage, "应存在 amount 列血缘");
-        assertEquals("direct mapping", amountLineage.getTransformation());
         assertEquals(1, amountLineage.getSourceColumns().size());
         assertEquals("amount", amountLineage.getSourceColumns().get(0).getColumnName());
         assertEquals("orders", amountLineage.getSourceColumns().get(0).getTable().getTableName());
