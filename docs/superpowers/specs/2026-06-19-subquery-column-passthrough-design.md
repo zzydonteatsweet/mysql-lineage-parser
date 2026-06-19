@@ -226,6 +226,8 @@ resolveBareColumnRef(tableRef, colName, lineage):
 
 ## 6. 测试策略
 
+> **实现结果（post-implementation，修订原预测）**：全仓 `mvn clean test` = **184/49**；`SelectLineageVisitorTest` = **44/18**。实际必绿交付 **8 个**（原列 6 + `prefixedDerivedColumnPassthrough` + `metadataFilterShouldKeepDerivedTablePassthrough`，后者验元数据+派生表交互）。下文原预测的 43/18、23→18 未计入 A2 元数据去歧义修复与硬化补丁——以本段为准。详见 plan《实现记录》。
+
 - **TDD 顺序**：5 个必绿用例已存在且当前红 → 先确认红 → 实现 → 验证转绿。
 - **必绿（本轮交付，共 6 个）**：
   - 穿透目标 3 个：`subqueryColumnPassthroughSingleLevel`（`id AS a`）、`multiLevelSubqueryColumnPassthrough`（两层）、`threeLevelSubqueryColumnPassthrough`（三层）。
@@ -277,14 +279,15 @@ threeLevelSubqueryColumnPassthrough               ← 本轮转绿
 - **递归顺序依赖**：flatten 成立的前提是「内层先解析完」。当前 `cacheSubqueryTableSource` 确实先 `processQueryBlock` 内层再处理外层——重构后该顺序必须保留（实现时勿打乱）。
 - **UNION 派生表**：`inner instanceof MySqlSelectQueryBlock` 不成立时会进 else 分支；本轮至少不得抛 `ClassCastException`，需保留兜底或显式 TODO。
 - **关联子查询 / scalar subquery in SELECT**（如 `fromSubqueryPlusScalarSubqueryInSelect`）：scalar 子查询出现在 SELECT 列表而非 FROM，走的是表达式路径，本轮不解析其内部列（out-of-scope），不得破坏其输入表收集。
-- **死代码删除范围**：`tryResolveSubqueryColumn`、`resolveColumnSourceTables(String)` 被 `resolveBareColumnRef`/`resolveColumnLineage` 取代后删除；`copySourcesFromInnerLineage` **保留并接线**（其 transformation 设置在裸列路径多余，统一由 `resolveColumnLineage` 设，保留无害或剥离——审查 P3）；`collectReferencedColumns`/`extractReferencedColumns` 暂留（一般表达式步骤会用到）；死字段 `nowScopeColumnLineages`(`:55`，全仓零引用) 一并删（审查 P3）。
+- **死代码删除范围**：`tryResolveSubqueryColumn`、`resolveColumnSourceTables(String)` 被 `resolveBareColumnRef`/`resolveColumnLineage` 取代后删除；`copySourcesFromInnerLineage` **保留并接线**（实现中改为 3 参带去重版，transformation 统一由 `resolveColumnLineage` 设）；死字段 `nowScopeColumnLineages`(`:55`，全仓零引用) 一并删。
+- **【实现偏离】死码簇已全删**：原计划"暂留"的 `collectReferencedColumns`/`extractReferencedColumns`/`resolveSingleTable`/`resolveTableByReference`，因 `extractReferencedColumns` 触发 PMD `UnusedPrivateMethod` 挡构建且确为死码，实现中已**全部删除**（commit `5fcb1d9`）。§9.1 一般表达式将来须新写遍历器，不复用它们。
 
 ---
 
 ## 9. 未来工作（同契约的后续步骤）
 
 ### 9.1 一般表达式物理列提取
-扩展 `resolveColumnLineage` 的 else 分支：用表达式遍历器（基于现成 `collectReferencedColumns` `:650-673`，补 `SQLCaseExpr`/`SQLAggregateExpr`）收集叶子列引用，逐个走 `resolveBareColumnRef`（复用本轮 A1+A2），`transformation = expr.toString()`。一次性转绿算术/函数/CASE/聚合类测试。
+扩展 `resolveColumnLineage` 的 else 分支：**新写**一个表达式遍历器（处理 `SQLBinaryOpExpr`/`SQLMethodInvokeExpr`/`SQLCaseExpr`/`SQLAggregateExpr`，收集叶子列引用）——原 `collectReferencedColumns` 死码簇已在本次清理中删除（见 §8 偏离），不复用。逐个叶子走 `resolveBareColumnRef`（复用本轮 A1+A2），`transformation = expr.toString()`。一次性转绿算术/函数/CASE/聚合类测试。
 
 ### 9.2 UNION 派生表
 `processQueryBlock` 之外补 `SQLUnionQuery` 分支：按分支收集各 `MySqlSelectQueryBlock` 的输出，按列位置合并 lineage。
