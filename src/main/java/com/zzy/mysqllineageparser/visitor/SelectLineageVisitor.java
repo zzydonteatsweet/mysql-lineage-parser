@@ -675,59 +675,6 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
     }
 
     /**
-     * 单表场景：缓存 Map 中仅有一个表来源时，无前缀列默认关联该表
-     */
-    private TableInfo resolveSingleTable() {
-        if (tableSourceCacheMap.size() == 1) {
-            return tableSourceCacheMap.keySet().iterator().next().toTableInfo();
-        }
-        return null;
-    }
-
-    /**
-     * 通过别名或表名从 tableSourceCache 查找物理表
-     */
-    private TableInfo resolveTableByReference(String reference) {
-        for (TableSourceKey key : tableSourceCacheMap.keySet()) {
-            if (reference.equals(key.getReferenceName())) {
-                return key.toTableInfo();
-            }
-        }
-        return null;
-    }
-
-    private List<ColumnInfo> extractReferencedColumns(SQLExpr expr) {
-        List<ColumnInfo> columns = new ArrayList<>();
-        collectReferencedColumns(expr, columns);
-        return columns;
-    }
-
-    private void collectReferencedColumns(SQLExpr expr, List<ColumnInfo> columns) {
-        if (expr == null) {
-            return;
-        }
-        if (expr instanceof SQLPropertyExpr) {
-            SQLPropertyExpr prop = (SQLPropertyExpr) expr;
-            TableInfo tableInfo = resolveTableByReference(stripBackticks(prop.getOwner().toString()));
-            columns.add(new ColumnInfo(tableInfo, stripBackticks(prop.getName())));
-        } else if (expr instanceof SQLIdentifierExpr) {
-            TableInfo tableInfo = resolveSingleTable();
-            columns.add(new ColumnInfo(tableInfo, stripBackticks(((SQLIdentifierExpr) expr).getName())));
-        } else if (expr instanceof SQLBinaryOpExpr) {
-            SQLBinaryOpExpr binary = (SQLBinaryOpExpr) expr;
-            collectReferencedColumns(binary.getLeft(), columns);
-            collectReferencedColumns(binary.getRight(), columns);
-        } else if (expr instanceof SQLMethodInvokeExpr) {
-            SQLMethodInvokeExpr method = (SQLMethodInvokeExpr) expr;
-            if (method.getArguments() != null) {
-                for (SQLExpr arg : method.getArguments()) {
-                    collectReferencedColumns(arg, columns);
-                }
-            }
-        }
-    }
-
-    /**
      * 获取 FROM 表来源缓存（供调试或后续子查询扩展使用）
      */
     public Map<TableSourceKey, QueryScopeCache> getTableSourceCacheMap() {
