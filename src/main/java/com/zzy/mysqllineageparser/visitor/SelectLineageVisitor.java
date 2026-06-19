@@ -44,16 +44,6 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
      */
     private QueryScopeCache currentScope;
 
-    /**
-     * 最近一次 visit(MySqlSelectQueryBlock) 创建的作用域（供子查询挂载）
-     */
-    private QueryScopeCache lastQueryBlockScope;
-
-    /**
-     * 当前查询域涉及到的血缘
-     */
-    private List<ColumnLineage> nowScopeColumnLineages;
-
     private final AtomicInteger nodeIdSeq = new AtomicInteger(0);
 
     /**
@@ -89,33 +79,48 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
      */
     @Override
     public boolean visit(MySqlSelectQueryBlock x) {
-        // 保存外层缓存，为当前查询块创建独立缓存
+        // 最外层入口：parentScope=null，nestingLevel 仍为 0，
+        // extractSelectColumns 照常把结果写进 lineageResult。
+        // 子查询不走这里，由 cacheSubqueryTableSource 直接调 processQueryBlock。
+        processQueryBlock(x, null);
+        return false;
+    }
+
+    /**
+     * 处理一个查询块：建独立 scope → FROM（建表来源缓存）→ SELECT（关联列血缘）→ WHERE。
+     * 返回它创建的 scope，使子查询可通过返回值把 scope 交给父层，
+     * 不再依赖 lastQueryBlockScope 寄存器。
+     *
+     * @param x           查询块
+     * @param parentScope 父作用域（最外层为 null；派生表内层为派生表 scope）
+     * @return 本次查询块创建的 scope
+     */
+    private QueryScopeCache processQueryBlock(MySqlSelectQueryBlock x, QueryScopeCache parentScope) {
+        // 每个查询块使用独立的 tableSourceCache，避免嵌套子查询破坏外层缓存
         Map<TableSourceKey, QueryScopeCache> outerCache = new LinkedHashMap<>(tableSourceCacheMap);
         tableSourceCacheMap.clear();
 
-        QueryScopeCache parentScope = currentScope;
-        currentScope = createQueryScope(parentScope, "query_result");
-        lastQueryBlockScope = currentScope;
+        QueryScopeCache savedScope = currentScope;
+        QueryScopeCache scope = createQueryScope(parentScope, "query_result");
+        currentScope = scope;
 
-        // 1. 先访问 FROM，将表来源写入当前层的 tableSourceCache
+        // 1. 先访问 FROM，将表来源写入当前层 tableSourceCache
         if (x.getFrom() != null) {
-            collectFromAndCache(x.getFrom(), currentScope);
+            collectFromAndCache(x.getFrom(), scope);
         }
-
         // 2. 再访问 SELECT 字段，利用缓存关联列血缘
         List<ColumnLineage> queryLineages = new ArrayList<>();
         extractSelectColumns(x, queryLineages);
-
         // 3. 最后处理 WHERE 过滤条件
         if (x.getWhere() != null) {
             applyWhereFilter(x.getWhere().toString(), queryLineages);
         }
 
-        currentScope = parentScope;
+        currentScope = savedScope;
         // 恢复外层缓存
         tableSourceCacheMap.clear();
         tableSourceCacheMap.putAll(outerCache);
-        return false;
+        return scope;
     }
 
     /**
@@ -165,7 +170,8 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
     }
 
     /**
-     * 缓存子查询派生表来源
+     * 缓存子查询派生表来源：直接调用 processQueryBlock 拿到内层 scope（局部返回值），
+     * 把内层的物理表与输出列折进派生表 scope。不再使用 lastQueryBlockScope 寄存器。
      */
     private void cacheSubqueryTableSource(SQLSubqueryTableSource tableSource, QueryScopeCache parentScope) {
         String derivedAlias = tableSource.getAlias() != null ? tableSource.getAlias() : "subquery";
@@ -173,32 +179,21 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
         TableSourceKey key = new TableSourceKey(null, derivedAlias, derivedAlias);
         QueryScopeCache cache = createQueryScope(parentScope, derivedAlias);
 
-        // 递归解析内层子查询，内层作用域挂到 subQueryCache
-        if (tableSource.getSelect() != null && tableSource.getSelect().getQuery() != null) {
+        SQLSelectQuery inner = (tableSource.getSelect() != null) ? tableSource.getSelect().getQuery() : null;
+        if (inner instanceof MySqlSelectQueryBlock) {
             nestingLevel++;
-            QueryScopeCache savedScope = currentScope;
-            currentScope = cache;
-
-            // 为内层子查询保存和重置缓存
-            Map<TableSourceKey, QueryScopeCache> outerCache = new LinkedHashMap<>(tableSourceCacheMap);
-            tableSourceCacheMap.clear();
-
-            tableSource.getSelect().getQuery().accept(this);
-
-            // 恢复缓存
-            tableSourceCacheMap.clear();
-            tableSourceCacheMap.putAll(outerCache);
-
-            if (lastQueryBlockScope != null) {
-                cache.addSubQueryCache(lastQueryBlockScope);
-                mergeInvolvedTables(cache, lastQueryBlockScope.getInvolvedTables());
-                // 将内层查询的输出列传递到派生表 scope，供外层穿透查找
-                cache.copyOutputColumnsFrom(lastQueryBlockScope);
-            }
-            currentScope = savedScope;
+            // 递归解析内层子查询，直接拿回它建的 scope（递归回传，替代 lastQueryBlockScope）
+            QueryScopeCache child = processQueryBlock((MySqlSelectQueryBlock) inner, cache);
             nestingLevel--;
-        }
 
+            cache.addSubQueryCache(child);
+            mergeInvolvedTables(cache, child.getInvolvedTables());
+            // 将内层查询的输出列传递到派生表 scope，供外层穿透查找
+            cache.copyOutputColumnsFrom(child);
+        }
+        // else: UNION 等其它派生表形态本轮不解析（spec §9.2），留待后续；此处不抛异常、不破坏外层缓存
+
+        // 【审查 P1.1】必须保留：派生表注册进外层 tableSourceCache 的唯一入口
         tableSourceCacheMap.put(key, cache);
         mergeInvolvedTables(parentScope, cache.getInvolvedTables());
     }
