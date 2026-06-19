@@ -65,7 +65,7 @@
 - **A1**：外层命中派生表时，拷内层 `sourceColumns` 上来（flatten）。
 - **A2-minimal**：SELECT 项是**裸列引用**（`SQLIdentifierExpr`、`SQLPropertyExpr` 非 `*`）时，按表达式列名 + FROM 表解析成物理列。
 
-→ 交付：3 个子查询穿透测试全绿；裸列别名（`salary AS annual` → `employees.salary`）达标；嵌套任意层正确穿透。
+→ 交付：3 个子查询穿透测试全绿；裸列引用按表达式解析到物理列（含别名场景，如 `id AS a` → `t1.id`）；嵌套任意层正确穿透。top-level 裸列**别名**（output≠expr）当前无专门断言用例，已在 §6 列为必绿直测 `bareColumnAliasShouldResolveToPhysicalColumn`（审查 P3）。
 
 ### 3.2 本轮 Out-of-scope（同契约的未来工作，spec 第 9 节展开）
 
@@ -130,6 +130,8 @@ if (inner instanceof MySqlSelectQueryBlock) {
 }
 ```
 
+> **重要（审查 P1.1 修订）**：上面 `if/else` 仅替换原 `:186` 的 `accept(this)` + `:192-197` 的 `lastQueryBlockScope` 读取块。**原 `:202` `tableSourceCacheMap.put(key, cache)`（派生表 `sub` 注册进外层 `tableSourceCacheMap` 的唯一入口）与 `:203` `mergeInvolvedTables(parentScope, cache.getInvolvedTables())` 必须保留**——§4.3 里 `resolveBareColumnRef` 之所以能"扫到 sub scope"全靠 `:202` 这次 put。丢了它 → 派生表不注册 → 外层找不到 sub → 3 个穿透用例继续 FAIL。
+
 **4.1.4** 删除字段 `lastQueryBlockScope`（`:50`）及其所有读写。`QueryScopeCache` 无需改动。
 
 > **Bug B 自动消失**：每个父节点拿到的是「自己的直接子层」（局部返回值），嵌套几层互不干扰，不存在「被孙子层覆盖又无还原」的机制。
@@ -177,14 +179,14 @@ resolveBareColumnRef(tableRef, colName, lineage):
         inner = scope.getOutputColumnLineage(colName)
         if inner != null:
             # A1 穿透：派生表能输出 colName → flatten 拷其已解析到物理的 sourceColumns
-            copySourcesFromInnerLineage(inner, lineage)          # 复用 :612（按 table+col 去重）
+            copySourcesFromInnerLineage(inner, lineage)          # 复用 :612 拷源列；去重需另加（审查 P1.2，见下）
         else:
             # A2 物理解析：物理表 → 用 key 的 TableInfo 记 物理表.colName
             lineage.addSourceColumn(new ColumnInfo(key.toTableInfo(), colName))
 ```
 
 > 说明：
-> - `copySourcesFromInnerLineage`（`:612`）已实现「拷 sourceColumns + 透传 transformation」，是现成死代码，本轮接线复用。`tryResolveSubqueryColumn`(`:582`) 由 `resolveBareColumnRef` 覆盖后删除。
+> - `copySourcesFromInnerLineage`（`:612`）已实现「拷 sourceColumns + 设 transformation」，是现成死代码，本轮接线复用。**但它与 `ColumnLineage.addSourceColumn`(`:60`) 都不去重**（审查 P1.2）——本轮需在拷完后按 `databaseName+tableName+columnName` 去重（或改其内部去重）。另：其 transformation 设置在裸列路径下多余，统一由 `resolveColumnLineage` 设一次即可（审查 P3）。`tryResolveSubqueryColumn`(`:582`) 由 `resolveBareColumnRef` 覆盖后删除。
 > - `toTableInfo()` 在 `TableSourceKey` 上（非 `QueryScopeCache`），故必须遍历 entry、用 `key.toTableInfo()`，与现有 `findMatchedTablesByOutputColumn`(`:352`) 一致。
 > - 多物理表裸列（`tableRef==null` 且多表且无派生命中）：得到多个物理候选，列名取自表达式（比现状用输出名更准），无现有测试约束，不构成回归；单表场景（`sourceColumnWithoutPrefixShouldResolveToSingleTable` 等）仍唯一命中。
 
@@ -216,7 +218,7 @@ resolveBareColumnRef(tableRef, colName, lineage):
 
 | 文件 | 改动 |
 |---|---|
-| `src/main/java/.../visitor/SelectLineageVisitor.java` | 主体：新增 `processQueryBlock`、`resolveColumnLineage`、`resolveBareColumnRef`；改 `visit(MySqlSelectQueryBlock)` 为 shim；改 `cacheSubqueryTableSource` 局部捕获；改 `extractSelectColumns` 传 expr；删 `lastQueryBlockScope` 字段；删/复用死代码 `tryResolveSubqueryColumn`/`copySourcesFromInnerLineage`/`resolveColumnSourceTables(String)` |
+| `src/main/java/.../visitor/SelectLineageVisitor.java` | 主体：新增 `processQueryBlock`、`resolveColumnLineage`、`resolveBareColumnRef`；改 `visit(MySqlSelectQueryBlock)` 为 shim；改 `cacheSubqueryTableSource` 局部捕获；改 `extractSelectColumns` 传 expr；删 `lastQueryBlockScope` 字段与死字段 `nowScopeColumnLineages`(`:55`)；删/复用死代码 `tryResolveSubqueryColumn`/`copySourcesFromInnerLineage`/`resolveColumnSourceTables(String)` |
 | `src/main/java/.../visitor/context/QueryScopeCache.java` | **无改动**（`outputColumnMap`/`involvedTables`/`copyOutputColumnsFrom` 均已具备） |
 | `src/test/.../visitor/SelectLineageVisitorTest.java` | 不改断言；现有穿透用例由红转绿 |
 
@@ -224,16 +226,37 @@ resolveBareColumnRef(tableRef, colName, lineage):
 
 ## 6. 测试策略
 
-- **TDD 顺序**：3 个穿透测试已存在且当前红 → 先确认它们红 → 实现 → 验证转绿。
-- **必绿（本轮交付）**：
-  - `subqueryColumnPassthroughSingleLevel`（`id AS a`）
-  - `multiLevelSubqueryColumnPassthrough`（两层）
-  - `threeLevelSubqueryColumnPassthrough`（三层）
-- **无回归（必须保持绿）**：裸列基础用例
-  - `sourceColumnShouldCarryCorrectTableInfo`、`sourceColumnWithoutPrefixShouldResolveToSingleTable`、`sourceColumnWithDatabasePrefixShouldCarryDatabaseName`、常量/无 FROM 用例、`SELECT *` 通配符用例。
-- **本轮仍红（out-of-scope，不要求转绿，但不得新增失败）**：
-  - `arithmeticExpressionShouldExtractAllReferencedColumns`、`nestedFunctionCallShouldExtractAllArguments`、`aggregationWithDistinctShouldExtractColumn`、`multipleExpressionsShouldEachHaveCorrectSources`、CASE/IF 类、`subqueryInJoinColumnPassthrough` 的 `total`（`SUM(amount)`）列。
+- **TDD 顺序**：5 个必绿用例已存在且当前红 → 先确认红 → 实现 → 验证转绿。
+- **必绿（本轮交付，共 6 个）**：
+  - 穿透目标 3 个：`subqueryColumnPassthroughSingleLevel`（`id AS a`）、`multiLevelSubqueryColumnPassthrough`（两层）、`threeLevelSubqueryColumnPassthrough`（三层）。
+  - 附带转绿 2 个（审查 P2.1）：`directMappingTransformation`、`selfJoinWithAliases`——当前 `resolveColumnSourceTables` 从不 `setTransformation`，裸列路径设 `"direct mapping"` 会顺手修绿（`selfJoinWithAliases` 的 `a.id` 经 `getReferenceName()=="a"` 命中 employees-a，已核 `TableSourceKey.java:31`）。
+  - 新增直测 1 个（审查 P3，本轮随实现一并补）：`bareColumnAliasShouldResolveToPhysicalColumn`，直测 A2-minimal 别名契约（output=别名、source=物理列）。断言：`SELECT salary AS annual FROM employees` → output=`annual`、source=`employees.salary`、transformation=`direct mapping`。
+- **无回归（必须保持绿）**：裸列基础用例 `sourceColumnShouldCarryCorrectTableInfo`、`sourceColumnWithoutPrefixShouldResolveToSingleTable`、`sourceColumnWithDatabasePrefixShouldCarryDatabaseName`；无 FROM 常量 `selectConstantsOnly`、`selectNoFromClauseShouldProduceNoInputTables`；`SELECT *` 通配符用例等。
+- **本轮仍红（out-of-scope，不要求转绿，不得新增失败）**：
+  - 一般表达式/常量：`arithmeticExpressionShouldExtractAllReferencedColumns`、`nestedFunctionCallShouldExtractAllArguments`、`aggregationWithDistinctShouldExtractColumn`、`multipleExpressionsShouldEachHaveCorrectSources`、`aliasColumnShouldRetainTransformation`、CASE/IF/COALESCE 类、`selectMixedConstantsAndColumns`（审查 P2.2：带 FROM 的常量 `1 AS flag` 仍兜底成 `users.flag`，本轮不修，保持红）。
+  - 子查询其它路径：`subqueryInJoinColumnPassthrough`（`total`=SUM）、`subqueryInSelectWithMultipleColumns`、`existsSubquery`/`notExistsSubquery`/`inSubqueryWithCorrelation`、`fromSubqueryPlusScalarSubqueryInSelect`、`subqueryInFromWithSubqueryInWhere`、`havingFilterConditionShouldBeRecorded`。
 - **构建命令**：`mvn test -Dtest=SelectLineageVisitorTest` 验证；最终 `mvn clean verify` 过静态检查（PMD/SpotBugs/Checkstyle）。
+
+**实测基线（审查 P2.3，已跑）**：当前 `Tests run: 42, Failures: 23, Errors: 0`。实现后预期 **23 → 18 fail**（5 个现有红转绿），且本轮**新增 1 个直测** `bareColumnAliasShouldResolveToPhysicalColumn`（实现后绿）→ 最终 **43 tests / 18 fail / 25 green**。其余 18 红 + 19 绿状态不变。23 个失败完整名单（`←` 标本轮转绿）：
+
+```
+arithmeticExpressionShouldExtractAllReferencedColumns
+aggregationWithDistinctShouldExtractColumn
+aliasColumnShouldRetainTransformation
+caseWhenSimpleFormatWithColumn / caseWhenWithMultipleColumnReferences
+coalesceFunctionShouldExtractArguments / ifFunctionShouldExtractArguments
+directMappingTransformation                       ← 本轮转绿
+existsSubquery / notExistsSubquery / inSubqueryWithCorrelation
+fromSubqueryPlusScalarSubqueryInSelect
+havingFilterConditionShouldBeRecorded
+multiLevelSubqueryColumnPassthrough               ← 本轮转绿
+multipleExpressionsShouldEachHaveCorrectSources / nestedFunctionCallShouldExtractAllArguments
+selectMixedConstantsAndColumns
+selfJoinWithAliases                               ← 本轮转绿
+subqueryColumnPassthroughSingleLevel              ← 本轮转绿
+subqueryInFromWithSubqueryInWhere / subqueryInJoinColumnPassthrough / subqueryInSelectWithMultipleColumns
+threeLevelSubqueryColumnPassthrough               ← 本轮转绿
+```
 
 ---
 
@@ -241,9 +264,9 @@ resolveBareColumnRef(tableRef, colName, lineage):
 
 | 决策点 | 结论 |
 |---|---|
-| transformation 取值 | 裸列引用（含穿透）→ `"direct mapping"`；穿透时透传内层 transformation（复用 `copySourcesFromInnerLineage` 现有逻辑）；一般表达式路径暂不设置（保持现状） |
+| transformation 取值 | 裸列引用（含穿透）→ `"direct mapping"`，**在 `resolveColumnLineage` 裸列分支统一设一次**（审查 P3：避免 `copySourcesFromInnerLineage` 再设一次造成双重赋值）；一般表达式路径暂不设置（保持现状） |
 | 裸列 + 多表无 meta 回退 | 保留现状「全表当来源」语义（`resolveBareColumnRef` 多 scope 自然得到多物理候选） |
-| 穿透拷来源列去重 | 按 `databaseName + tableName + columnName` 去重，避免 `sub.total` 类出现重复 |
+| 穿透拷来源列去重 | 按 `databaseName+tableName+columnName` 去重，避免 `sub.total` 类重复（审查 P1.2：`:612`/`addSourceColumn` 都不去重，属净新增逻辑） |
 | flatten vs chain | **flatten**：单层测试要求 `sources.get(0)` 直接是物理叶；多层测试用 `findLeafSource`/链遍历兼容 flatten。统一 flatten |
 | `outputColumn` 是否带表 | 否：`outputColumn` 仅列名（别名或列名），与现状一致；物理信息只进 `sourceColumns` |
 
@@ -254,7 +277,7 @@ resolveBareColumnRef(tableRef, colName, lineage):
 - **递归顺序依赖**：flatten 成立的前提是「内层先解析完」。当前 `cacheSubqueryTableSource` 确实先 `processQueryBlock` 内层再处理外层——重构后该顺序必须保留（实现时勿打乱）。
 - **UNION 派生表**：`inner instanceof MySqlSelectQueryBlock` 不成立时会进 else 分支；本轮至少不得抛 `ClassCastException`，需保留兜底或显式 TODO。
 - **关联子查询 / scalar subquery in SELECT**（如 `fromSubqueryPlusScalarSubqueryInSelect`）：scalar 子查询出现在 SELECT 列表而非 FROM，走的是表达式路径，本轮不解析其内部列（out-of-scope），不得破坏其输入表收集。
-- **死代码删除范围**：`tryResolveSubqueryColumn`、`resolveColumnSourceTables(String)` 被 `resolveBareColumnRef`/`resolveColumnLineage` 取代后删除；`copySourcesFromInnerLineage` **保留并接线**；`collectReferencedColumns`/`extractReferencedColumns` 暂留（一般表达式步骤会用到）。
+- **死代码删除范围**：`tryResolveSubqueryColumn`、`resolveColumnSourceTables(String)` 被 `resolveBareColumnRef`/`resolveColumnLineage` 取代后删除；`copySourcesFromInnerLineage` **保留并接线**（其 transformation 设置在裸列路径多余，统一由 `resolveColumnLineage` 设，保留无害或剥离——审查 P3）；`collectReferencedColumns`/`extractReferencedColumns` 暂留（一般表达式步骤会用到）；死字段 `nowScopeColumnLineages`(`:55`，全仓零引用) 一并删（审查 P3）。
 
 ---
 
