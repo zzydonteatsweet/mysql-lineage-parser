@@ -375,8 +375,8 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
 
     /**
      * 解析裸列引用到 sourceColumns：
-     * 本任务（A2）只做物理分支——按 tableRef 过滤来源，记 物理表.colName。
-     * Task 3 会补上「命中派生表输出列时 flatten 拷内层源列」的 A1 分支。
+     * - 命中派生表输出列（inner != null）时 flatten 拷内层已解析到物理的 sourceColumns（A1 穿透）；
+     *   否则记 物理表.colName（A2 物理解析）。
      * 无前缀裸列 + 多表 + 有元数据时，用元数据筛掉不含该列的表（JOIN 去歧义，
      * 避免 SELECT amount FROM orders JOIN users 把 users 也当来源）；筛完为空则保留全部（兜底）。
      * 按 databaseName+tableName+columnName 去重（审查 P1.2：addSourceColumn 不去重）。
@@ -403,9 +403,16 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
         }
         Set<String> seen = new HashSet<>();
         for (TableSourceKey key : candidates) {
-            ColumnInfo src = new ColumnInfo(key.toTableInfo(), colName);
-            if (seen.add(sourceDedupKey(src))) {
-                lineage.addSourceColumn(src);
+            ColumnLineage inner = tableSourceCacheMap.get(key).getOutputColumnLineage(colName);
+            if (inner != null) {
+                // A1 穿透：派生表能输出 colName → flatten 拷其已解析到物理的 sourceColumns
+                copySourcesFromInnerLineage(inner, lineage, seen);
+            } else {
+                // A2 物理解析
+                ColumnInfo src = new ColumnInfo(key.toTableInfo(), colName);
+                if (seen.add(sourceDedupKey(src))) {
+                    lineage.addSourceColumn(src);
+                }
             }
         }
     }
@@ -652,16 +659,19 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
     }
 
     /**
-     * 从内层查询 lineage 复制源列和转换信息到外层 lineage
+     * 从内层查询 lineage 复制源列到外层 lineage（A1 穿透用）：
+     * - 按传入的 seen 集合去重（与 resolveBareColumnRef 共享同一集合，跨多来源统一去重）。
+     * - 不在此设 transformation：裸列路径统一由 resolveColumnLineage 设 "direct mapping"。
      */
-    private void copySourcesFromInnerLineage(ColumnLineage innerLineage, ColumnLineage outerLineage) {
-        if (innerLineage.getSourceColumns() != null) {
-            for (ColumnInfo source : innerLineage.getSourceColumns()) {
+    private void copySourcesFromInnerLineage(ColumnLineage innerLineage, ColumnLineage outerLineage, Set<String> seen) {
+        if (innerLineage == null || innerLineage.getSourceColumns() == null) {
+            return;
+        }
+        for (ColumnInfo source : innerLineage.getSourceColumns()) {
+            if (source != null && seen.add(sourceDedupKey(source))) {
                 outerLineage.addSourceColumn(source);
             }
         }
-        String transformation = innerLineage.getTransformation();
-        outerLineage.setTransformation(transformation != null ? transformation : "direct mapping");
     }
 
     /**
