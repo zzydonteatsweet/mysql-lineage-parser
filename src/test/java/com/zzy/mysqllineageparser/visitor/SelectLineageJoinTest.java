@@ -386,6 +386,45 @@ class SelectLineageJoinTest {
         assertEquals("orders", lineage.getSourceColumns().get(0).getTable().getTableName());
     }
 
+    /**
+     * 元数据 + 派生表穿透回归：无前缀裸列 a 选自多源 FROM（含派生表 sub），且元数据在场。
+     * <p>
+     * 关键：元数据知道物理表 users 拥有列 a，但没有任何物理表叫 sub（派生别名）。
+     * 旧实现的元数据过滤会用别名 sub 查真实元数据、查不到而误删派生表候选；又因 users 拥有 a
+     * 使 filtered 非空，于是只剩 users，派生表 sub 的 a → t1.id 穿透被静默丢弃，
+     * 输出错误地解析到 users.a。修复后，派生表能输出 a（scope.getOutputColumnLineage 命中）
+     * 须被保留，a 正确穿透到 t1.id，绝不应解析到 users.a。
+     */
+    @Test
+    void metadataFilterShouldKeepDerivedTablePassthrough() {
+        TableMetaSupport meta = tableName -> {
+            switch (tableName) {
+                case "t1":
+                    return Arrays.asList(new ColumnInfo(null, "id"));
+                case "users":
+                    // users 也声明拥有列 a，用来诱导旧元数据过滤把 sub 删掉、只剩 users
+                    return Arrays.asList(new ColumnInfo(null, "id"), new ColumnInfo(null, "a"));
+                default:
+                    return Collections.emptyList();
+            }
+        };
+        String sql = "SELECT a FROM (SELECT id AS a FROM t1) sub, users u";
+
+        LineageResult result = parse(sql, meta);
+
+        ColumnLineage lineage = result.getColumnLineages().get(0);
+        assertEquals("a", lineage.getOutputColumn().getColumnName());
+
+        List<String> sources = sourceColumnNames(lineage);
+        assertTrue(sources.contains("id"),
+                "派生表 sub.a 必须穿透到 t1.id，不应被元数据过滤删除");
+
+        boolean resolvesToT1 = lineage.getSourceColumns().stream()
+                .anyMatch(sc -> "t1".equals(sc.getTable().getTableName()));
+        assertTrue(resolvesToT1,
+                "a 应穿透到 t1（派生表候选须保留）；旧实现会因用别名 sub 查元数据查不到而把 sub 删掉，导致只剩 users.a、t1.id 穿透丢失");
+    }
+
     // ==================== 7. JOIN + 通配符 ====================
 
     @Test

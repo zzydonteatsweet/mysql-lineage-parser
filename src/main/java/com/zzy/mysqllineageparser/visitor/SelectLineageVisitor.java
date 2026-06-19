@@ -389,11 +389,14 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
             }
             candidates.add(key);
         }
-        // 无前缀 + 多表 + 有元数据：筛掉不含该列的表；筛完为空则保留全部（兜底）
+        // 无前缀 + 多表 + 有元数据：筛掉不含该列的物理表；派生表能输出该列（A1 穿透）须保留，
+        // 否则用派生别名去查真实元数据会查不到、误删派生表候选导致穿透丢失。筛完为空则保留全部（兜底）。
         if (tableRef == null && tableMetaSupport != null && candidates.size() > 1) {
             List<TableSourceKey> filtered = new ArrayList<>();
             for (TableSourceKey key : candidates) {
-                if (tableHasColumn(key.getTableName(), colName)) {
+                QueryScopeCache scope = tableSourceCacheMap.get(key);
+                if ((scope != null && scope.getOutputColumnLineage(colName) != null)
+                        || tableHasColumn(key.getTableName(), colName)) {
                     filtered.add(key);
                 }
             }

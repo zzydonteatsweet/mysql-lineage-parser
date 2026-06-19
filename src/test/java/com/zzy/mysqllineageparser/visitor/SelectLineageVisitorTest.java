@@ -185,6 +185,20 @@ class SelectLineageVisitorTest {
     }
 
     @Test
+    void prefixedDerivedColumnPassthrough() {
+        // 带前缀引用派生表列：sub.a 应穿透到 t1.id（tableRef 过滤命中 sub，再 A1 flatten）
+        String sql = "SELECT sub.a FROM (SELECT id AS a FROM t1) sub";
+        LineageResult result = parse(sql);
+
+        ColumnLineage cl = result.getColumnLineages().get(0);
+        assertEquals("a", cl.getOutputColumn().getColumnName());
+        assertTrue(cl.getSourceColumns().size() >= 1);
+        ColumnInfo src = cl.getSourceColumns().get(0);
+        assertEquals("id", src.getColumnName());
+        assertEquals("t1", src.getTable().getTableName());
+    }
+
+    @Test
     void multiLevelSubqueryColumnPassthrough() {
         String sql = "SELECT x FROM (SELECT a AS x FROM (SELECT id AS a FROM t1) inner_sub) outer_sub";
         LineageResult result = parse(sql);
