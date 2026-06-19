@@ -246,7 +246,7 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
             // 通配符 (* / t.*) 走单独展开逻辑；具名列走表来源解析
             ColumnLineage lineage = isWildcardExpr(expr)
                     ? resolveWildcardColumn(expr)
-                    : resolveColumnSourceTables(outputColumnName);
+                    : resolveColumnLineage(expr, outputColumnName);
 
             queryLineages.add(lineage);
 
@@ -309,31 +309,116 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
     }
 
     /**
-     * 构建列血缘并解析其所属的来源表，写入 lineage 的 sourceColumns
-     * <p>
-     * 解析策略（按优先级回退）：
-     * 1. 从 tableSourceCacheMap 中遍历，检查子查询 outputColumnMap 是否有同名列
-     * 2. 使用 tableMetaSupport 查询每个表的实际字段，匹配同名列
-     * 3. 以上均未命中，将缓存中所有表作为来源表
-     *
-     * @param colName 输出列名
-     * @return 构建好的列血缘对象
+     * 判断是否为裸列引用：SQLIdentifierExpr（col）或 SQLPropertyExpr 且 name 非 "*"（t.col）。
      */
-    private ColumnLineage resolveColumnSourceTables(String colName) {
-        ColumnInfo outputColumn = new ColumnInfo(null, colName);
+    private boolean isBareColumnRef(SQLExpr expr) {
+        if (expr instanceof SQLIdentifierExpr) {
+            return true;
+        }
+        if (expr instanceof SQLPropertyExpr) {
+            return !"*".equals(stripBackticks(((SQLPropertyExpr) expr).getName()));
+        }
+        return false;
+    }
+
+    /**
+     * 取裸列引用里的列名（来自表达式，非输出别名）。
+     */
+    private String bareColumnName(SQLExpr expr) {
+        if (expr instanceof SQLIdentifierExpr) {
+            return stripBackticks(((SQLIdentifierExpr) expr).getName());
+        }
+        return stripBackticks(((SQLPropertyExpr) expr).getName());
+    }
+
+    /**
+     * 取裸列引用里的表前缀（别名/表名）。SQLIdentifierExpr 返回 null；SQLPropertyExpr 返回 owner 文本。
+     */
+    private String bareTableRef(SQLExpr expr) {
+        if (expr instanceof SQLIdentifierExpr) {
+            return null;
+        }
+        SQLExpr owner = ((SQLPropertyExpr) expr).getOwner();
+        return owner != null ? stripBackticks(owner.toString()) : null;
+    }
+
+    /**
+     * 构建列血缘并解析其来源，按表达式形态分流：
+     * - 裸列引用：A2 按表达式列名解析到物理列（resolveBareColumnRef），transformation="direct mapping"。
+     * - 一般表达式/常量/字面量：保持现状（输出名匹配 + 全表兜底），transformation 暂不设置。
+     *
+     * @param expr       SELECT 项的表达式
+     * @param outputName 输出列名（别名优先）
+     */
+    private ColumnLineage resolveColumnLineage(SQLExpr expr, String outputName) {
+        ColumnInfo outputColumn = new ColumnInfo(null, outputName);
         ColumnLineage lineage = new ColumnLineage(outputColumn, (TableInfo) null);
 
-        // 按优先级依次尝试三种解析策略，命中即用，均未命中则兜底取全部表
-        List<TableInfo> matchedTables = findMatchedTablesByOutputColumn(colName);
-        if (matchedTables.isEmpty()) {
-            matchedTables = findMatchedTablesByTableMeta(colName);
+        if (isBareColumnRef(expr)) {
+            String colName = bareColumnName(expr);
+            String tableRef = bareTableRef(expr);
+            resolveBareColumnRef(tableRef, colName, lineage);
+            lineage.setTransformation("direct mapping");
+        } else {
+            // 一般表达式/常量/字面量：本轮保持现状
+            List<TableInfo> matchedTables = findMatchedTablesByOutputColumn(outputName);
+            if (matchedTables.isEmpty()) {
+                matchedTables = findMatchedTablesByTableMeta(outputName);
+            }
+            if (matchedTables.isEmpty()) {
+                matchedTables = collectAllCachedTables();
+            }
+            addSourceColumnsForTables(matchedTables, outputName, lineage);
         }
-        if (matchedTables.isEmpty()) {
-            matchedTables = collectAllCachedTables();
-        }
-
-        addSourceColumnsForTables(matchedTables, colName, lineage);
         return lineage;
+    }
+
+    /**
+     * 解析裸列引用到 sourceColumns：
+     * 本任务（A2）只做物理分支——按 tableRef 过滤来源，记 物理表.colName。
+     * Task 3 会补上「命中派生表输出列时 flatten 拷内层源列」的 A1 分支。
+     * 无前缀裸列 + 多表 + 有元数据时，用元数据筛掉不含该列的表（JOIN 去歧义，
+     * 避免 SELECT amount FROM orders JOIN users 把 users 也当来源）；筛完为空则保留全部（兜底）。
+     * 按 databaseName+tableName+columnName 去重（审查 P1.2：addSourceColumn 不去重）。
+     */
+    private void resolveBareColumnRef(String tableRef, String colName, ColumnLineage lineage) {
+        List<TableSourceKey> candidates = new ArrayList<>();
+        for (TableSourceKey key : tableSourceCacheMap.keySet()) {
+            if (tableRef != null && !tableRef.equals(key.getReferenceName())) {
+                continue;   // 带前缀：只看引用命中的来源
+            }
+            candidates.add(key);
+        }
+        // 无前缀 + 多表 + 有元数据：筛掉不含该列的表；筛完为空则保留全部（兜底）
+        if (tableRef == null && tableMetaSupport != null && candidates.size() > 1) {
+            List<TableSourceKey> filtered = new ArrayList<>();
+            for (TableSourceKey key : candidates) {
+                if (tableHasColumn(key.getTableName(), colName)) {
+                    filtered.add(key);
+                }
+            }
+            if (!filtered.isEmpty()) {
+                candidates = filtered;
+            }
+        }
+        Set<String> seen = new HashSet<>();
+        for (TableSourceKey key : candidates) {
+            ColumnInfo src = new ColumnInfo(key.toTableInfo(), colName);
+            if (seen.add(sourceDedupKey(src))) {
+                lineage.addSourceColumn(src);
+            }
+        }
+    }
+
+    /**
+     * 来源列去重键：databaseName|tableName|columnName（审查 P1.2）。
+     */
+    private static String sourceDedupKey(ColumnInfo c) {
+        TableInfo t = c.getTable();
+        String db = (t != null && t.getDatabaseName() != null) ? t.getDatabaseName() : "";
+        String tbl = (t != null && t.getTableName() != null) ? t.getTableName() : "";
+        String col = (c.getColumnName() != null) ? c.getColumnName() : "";
+        return db + "|" + tbl + "|" + col;
     }
 
     /**
@@ -564,41 +649,6 @@ public class SelectLineageVisitor extends MySqlASTVisitorAdapter {
                 }
             }
         }
-    }
-
-    /**
-     * 尝试子查询穿透解析：从子查询 scope 的 outputColumnMap 查找列
-     *
-     * @param tableRef 表引用（别名或表名），null 表示单表无前缀场景
-     * @param colName  列名
-     * @param lineage  待填充的血缘对象
-     * @return 是否穿透成功
-     */
-    private boolean tryResolveSubqueryColumn(String tableRef, String colName, ColumnLineage lineage) {
-        if (tableRef != null) {
-            // 有表前缀：t.col → 查找子查询 scope
-            for (Map.Entry<TableSourceKey, QueryScopeCache> entry : tableSourceCacheMap.entrySet()) {
-                if (tableRef.equals(entry.getKey().getReferenceName())) {
-                    ColumnLineage innerLineage = entry.getValue().getOutputColumnLineage(colName);
-                    if (innerLineage != null) {
-                        copySourcesFromInnerLineage(innerLineage, lineage);
-                        return true;
-                    }
-                }
-            }
-        } else {
-            // 无表前缀：单表 → 检查唯一表来源是否为子查询
-            if (tableSourceCacheMap.size() == 1) {
-                Map.Entry<TableSourceKey, QueryScopeCache> entry =
-                        tableSourceCacheMap.entrySet().iterator().next();
-                ColumnLineage innerLineage = entry.getValue().getOutputColumnLineage(colName);
-                if (innerLineage != null) {
-                    copySourcesFromInnerLineage(innerLineage, lineage);
-                    return true;
-                }
-            }
-        }
-        return false;
     }
 
     /**

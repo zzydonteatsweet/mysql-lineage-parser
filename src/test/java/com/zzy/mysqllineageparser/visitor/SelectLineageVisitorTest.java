@@ -82,6 +82,22 @@ class SelectLineageVisitorTest {
         assertEquals("u", table.getAlias());
     }
 
+    @Test
+    void bareColumnAliasShouldResolveToPhysicalColumn() {
+        // 直测 A2-minimal：裸列别名 output≠expr。output 取别名，source 必须是物理列。
+        String sql = "SELECT salary AS annual FROM employees";
+        LineageResult result = parse(sql);
+
+        assertEquals(1, result.getColumnLineages().size());
+        ColumnLineage cl = result.getColumnLineages().get(0);
+        assertEquals("annual", cl.getOutputColumn().getColumnName(), "output 取别名");
+        assertEquals(1, cl.getSourceColumns().size());
+        ColumnInfo src = cl.getSourceColumns().get(0);
+        assertEquals("salary", src.getColumnName(), "source 取表达式里的物理列名，非输出别名");
+        assertEquals("employees", src.getTable().getTableName());
+        assertEquals("direct mapping", cl.getTransformation());
+    }
+
     // ==================== 2. 复杂表达式来源列提取 ====================
 
     @Test
