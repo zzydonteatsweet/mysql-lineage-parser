@@ -11,6 +11,30 @@
 
 目前已支持 `CREATE TABLE` 的元数据提取和 `SELECT` 的列血缘解析（含子查询、JOIN、UNION 等场景）。
 
+## 功能特性
+
+### 表级血缘
+自动识别 SQL 的**输入表 / 输出表**，覆盖 `FROM`、多种 `JOIN`、`UNION`，以及**子查询**中的物理表 —— 嵌套子查询最内层的物理表也会被纳入输入表。
+
+### 列级血缘
+- 建立「源列 → 输出列」映射，并解析每列的来源表与列名。
+- 支持**表别名 + 列别名**：`SELECT u.id AS user_id FROM users AS u` 中 `user_id` 的来源正确指向带别名 `u` 的 `users.id`。
+- 支持**表达式与函数转换**并记录 `transformation`：
+  - 运算：`salary * 1.1`
+  - 函数：`CONCAT(first_name, ' ', last_name)`
+  - 聚合：`SUM(amount)`、`AVG(salary)`
+  - `CASE WHEN ... END`
+  - 直接映射的列 `transformation` 标记为 `direct mapping`
+- 记录 `WHERE` / `HAVING` 等**过滤条件**（`filterCondition`）。
+
+### 子查询列血缘穿透
+本解析器的核心能力之一。对于 `SELECT ... FROM (SELECT ...) t` 这类带派生表的子查询：
+
+- 外层列血缘可以**穿透派生表，逐层追溯到最内层的物理源列**，而不会停在派生表的输出别名上。
+  - 例：`SELECT a FROM (SELECT id AS a FROM t1) sub` 中 `a` 的来源直接指向 `t1.id`。
+- 支持**多层嵌套子查询**：沿作用域的 `outputColumnMap` 一路回传到物理列。
+- 即使列引用带 `db.table.col` 前缀、或来源表信息需要物理元数据补充，穿透链路依然完整。
+
 ## 技术栈
 
 | 分类 | 选型 |
